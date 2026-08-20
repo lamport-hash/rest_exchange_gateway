@@ -45,8 +45,9 @@ class OkxRestClient
     /// POST /api/v5/trade/amend-order.
     [[nodiscard]] auto amend_order(const OkxAmendRequest& a_request) const -> Result<OkxOrderAck>;
 
-    /// GET /api/v5/trade/order-info. A well-formed reply with an empty data
-    /// array yields std::nullopt (unknown order for the venue).
+    /// GET /api/v5/trade/order. A well-formed reply with an empty data
+    /// array yields std::nullopt (unknown order for the venue); an unknown
+    /// order is normally reported by OKX as venue error "51603".
     [[nodiscard]] auto
     get_order(const OkxQuery& a_query) const -> Result<std::optional<OkxOrderInfo>>;
 

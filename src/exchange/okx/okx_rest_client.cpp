@@ -13,7 +13,7 @@ namespace {
 constexpr const char* kPathPlace = "/api/v5/trade/order";
 constexpr const char* kPathCancel = "/api/v5/trade/cancel-order";
 constexpr const char* kPathAmend = "/api/v5/trade/amend-order";
-constexpr const char* kPathOrderInfo = "/api/v5/trade/order-info";
+constexpr const char* kPathOrderInfo = "/api/v5/trade/order";
 
 auto string_field(const nlohmann::json& a_node, const char* a_name) -> std::optional<std::string>
 {
@@ -109,8 +109,7 @@ auto OkxRestClient::signed_request(const char* a_method, const std::string& a_pa
         {"OK-ACCESS-KEY", config_.api_key},
         {"OK-ACCESS-SIGN", sign_request(timestamp, a_method, a_path, a_body, config_.secret_key)},
         {"OK-ACCESS-TIMESTAMP", timestamp},
-        {"OK-ACCESS-PASSPHRASE", config_.passphrase},
-        {"Content-Type", "application/json"}};
+        {"OK-ACCESS-PASSPHRASE", config_.passphrase}};
     if (config_.demo_trading) {
         headers.emplace("x-simulated-trading", "1");
     }

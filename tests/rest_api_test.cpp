@@ -97,15 +97,15 @@ TEST_CASE("place and fetch an order end-to-end")
 
     const auto place = fixture.client().Post(
         "/orders",
-        R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+        R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
         "application/json");
     REQUIRE(place != nullptr);
     REQUIRE(place->status == 201);
     const auto placed = nlohmann::json::parse(place->body);
-    CHECK(placed["clientOrderId"] == "gw-0001");
+    CHECK(placed["clientOrderId"] == "gw0001");
     CHECK(placed["exchangeOrderId"] == "mock-1");
 
-    const auto get = fixture.client().Get("/orders/gw-0001?instrumentId=BTC-USDT");
+    const auto get = fixture.client().Get("/orders/gw0001?instrumentId=BTC-USDT");
     REQUIRE(get != nullptr);
     REQUIRE(get->status == 200);
     const auto snapshot = nlohmann::json::parse(get->body);
@@ -123,12 +123,12 @@ TEST_CASE("partial fill is visible through the gateway")
         fixture.client()
             .Post(
                 "/orders",
-                R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+                R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
                 "application/json")
             ->status == 201);
-    fixture.mock().apply_fill("gw-0001", "0.0004", "49999.5");
+    fixture.mock().apply_fill("gw0001", "0.0004", "49999.5");
 
-    const auto get = fixture.client().Get("/orders/gw-0001?instrumentId=BTC-USDT");
+    const auto get = fixture.client().Get("/orders/gw0001?instrumentId=BTC-USDT");
     REQUIRE(get != nullptr);
     REQUIRE(get->status == 200);
     const auto snapshot = nlohmann::json::parse(get->body);
@@ -145,16 +145,16 @@ TEST_CASE("cancel an order through the gateway")
         fixture.client()
             .Post(
                 "/orders",
-                R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+                R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
                 "application/json")
             ->status == 201);
 
-    const auto cancel = fixture.client().Delete("/orders/gw-0001?instrumentId=BTC-USDT");
+    const auto cancel = fixture.client().Delete("/orders/gw0001?instrumentId=BTC-USDT");
     REQUIRE(cancel != nullptr);
     REQUIRE(cancel->status == 200);
     CHECK(nlohmann::json::parse(cancel->body)["exchangeOrderId"] == "mock-1");
 
-    const auto get = fixture.client().Get("/orders/gw-0001?instrumentId=BTC-USDT");
+    const auto get = fixture.client().Get("/orders/gw0001?instrumentId=BTC-USDT");
     REQUIRE(get != nullptr);
     CHECK(nlohmann::json::parse(get->body)["state"] == "canceled");
 }
@@ -177,7 +177,7 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","side":"buy","type":"limit","price":"1","quantity":"1"})",
+            R"({"clientOrderId":"gw0001","side":"buy","type":"limit","price":"1","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -187,7 +187,7 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"hodl","type":"limit","price":"1","quantity":"1"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"hodl","type":"limit","price":"1","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -197,7 +197,7 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"cheap","quantity":"1"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"cheap","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -207,7 +207,7 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","quantity":"1"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -217,7 +217,7 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"market","price":"1","quantity":"1"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"market","price":"1","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -227,7 +227,27 @@ TEST_CASE("validation errors use the structured error schema")
     {
         const auto res = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"-2"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"-2"})",
+            "application/json");
+        REQUIRE(res->status == 400);
+        CHECK(error_body(res)["error"]["code"] == "invalid_request");
+    }
+
+    SUBCASE("hyphenated clientOrderId")
+    {
+        const auto res = fixture.client().Post(
+            "/orders",
+            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
+            "application/json");
+        REQUIRE(res->status == 400);
+        CHECK(error_body(res)["error"]["code"] == "invalid_request");
+    }
+
+    SUBCASE("clientOrderId longer than 32 characters")
+    {
+        const auto res = fixture.client().Post(
+            "/orders",
+            R"({"clientOrderId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
             "application/json");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
@@ -235,7 +255,7 @@ TEST_CASE("validation errors use the structured error schema")
 
     SUBCASE("missing instrumentId query on GET")
     {
-        const auto res = fixture.client().Get("/orders/gw-0001");
+        const auto res = fixture.client().Get("/orders/gw0001");
         REQUIRE(res->status == 400);
         CHECK(error_body(res)["error"]["code"] == "invalid_request");
     }
@@ -249,18 +269,18 @@ TEST_CASE("venue errors map to structured responses")
     {
         const auto first = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
             "application/json");
         REQUIRE(first->status == 201);
 
         const auto second = fixture.client().Post(
             "/orders",
-            R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
             "application/json");
         REQUIRE(second->status == 409);
         const auto error = error_body(second)["error"];
         CHECK(error["code"] == "venue_rejected");
-        CHECK(error["clientOrderId"] == "gw-0001");
+        CHECK(error["clientOrderId"] == "gw0001");
     }
 
     SUBCASE("unknown order on GET becomes 404 not_found")
@@ -296,7 +316,7 @@ TEST_CASE("venue connectivity problems become 502 venue_unavailable")
 
     const auto res = client.Post(
         "/orders",
-        R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+        R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
         "application/json");
     REQUIRE(res->status == 502);
     CHECK(error_body(res)["error"]["code"] == "venue_unavailable");
@@ -312,7 +332,7 @@ TEST_CASE("malformed venue payloads become 500 internal")
 
     const auto res = fixture.client().Post(
         "/orders",
-        R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+        R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
         "application/json");
     REQUIRE(res->status == 500);
     CHECK(error_body(res)["error"]["code"] == "internal");
@@ -343,7 +363,7 @@ TEST_CASE("market orders reach the venue without a price field")
 
     const auto res = fixture.client().Post(
         "/orders",
-        R"({"clientOrderId":"gw-0001","instrumentId":"BTC-USDT","side":"sell","type":"market","quantity":"0.001"})",
+        R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"sell","type":"market","quantity":"0.001"})",
         "application/json");
     REQUIRE(res->status == 201);
 

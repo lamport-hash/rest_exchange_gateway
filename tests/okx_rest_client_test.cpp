@@ -39,7 +39,7 @@ auto fixed_clock_client(const OkxConfig& a_config) -> OkxRestClient
 
 auto limit_buy() -> OkxPlaceRequest
 {
-    return OkxPlaceRequest{.cl_ord_id = "gw-0001",
+    return OkxPlaceRequest{.cl_ord_id = "gw0001",
                            .inst_id = "BTC-USDT",
                            .side = "buy",
                            .ord_type = "limit",
@@ -56,10 +56,10 @@ TEST_CASE("place and fetch a live order (normal path)")
     const auto ack = client.place_order(limit_buy());
     REQUIRE(ack.is_ok());
     CHECK(ack.value().ord_id == "mock-1");
-    CHECK(ack.value().cl_ord_id == "gw-0001");
+    CHECK(ack.value().cl_ord_id == "gw0001");
     CHECK(ack.value().s_code == "0");
 
-    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(info.is_ok());
     REQUIRE(info.value().has_value());
     CHECK(info.value()->state == "live");
@@ -76,8 +76,20 @@ TEST_CASE("place and fetch a live order (normal path)")
     CHECK(recorded.front().headers.find("OK-ACCESS-TIMESTAMP")->second ==
           "2026-08-20T10:00:00.000Z");
     CHECK(recorded.front().headers.count("x-simulated-trading") == 1);
-    CHECK(recorded.back().target.find("/api/v5/trade/order-info?instId=BTC-USDT&clOrdId=gw-0001") ==
-          0);
+    CHECK(recorded.back().target.find("/api/v5/trade/order?instId=BTC-USDT&clOrdId=gw0001") == 0);
+}
+
+TEST_CASE("place sends exactly one Content-Type header")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    REQUIRE(client.place_order(limit_buy()).is_ok());
+    const auto recorded = server.recorded_requests();
+    REQUIRE(recorded.size() == 1);
+    CHECK(recorded.front().headers.count("Content-Type") == 1);
+    CHECK(recorded.front().headers.find("Content-Type")->second == "application/json");
 }
 
 TEST_CASE("full auto-fill on place")
@@ -89,7 +101,7 @@ TEST_CASE("full auto-fill on place")
 
     REQUIRE(client.place_order(limit_buy()).is_ok());
 
-    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(info.is_ok());
     REQUIRE(info.value().has_value());
     CHECK(info.value()->state == "filled");
@@ -107,16 +119,16 @@ TEST_CASE("scripted partial fill reports partially_filled with weighted average"
     request.sz = "1";
     REQUIRE(client.place_order(request).is_ok());
 
-    server.apply_fill("gw-0001", "0.4", "100");
-    const auto partial = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    server.apply_fill("gw0001", "0.4", "100");
+    const auto partial = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(partial.is_ok());
     REQUIRE(partial.value().has_value());
     CHECK(partial.value()->state == "partially_filled");
     CHECK(partial.value()->acc_fill_sz == "0.4");
     CHECK(partial.value()->avg_px == "100");
 
-    server.apply_fill("gw-0001", "0.6", "200");
-    const auto done = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    server.apply_fill("gw0001", "0.6", "200");
+    const auto done = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(done.is_ok());
     REQUIRE(done.value().has_value());
     CHECK(done.value()->state == "filled");
@@ -131,11 +143,11 @@ TEST_CASE("cancel a live order then observe canceled state")
     const auto client = fixed_clock_client(config_for(server));
 
     REQUIRE(client.place_order(limit_buy()).is_ok());
-    const auto cancel = client.cancel_order(OkxCxlRequest{"BTC-USDT", "gw-0001"});
+    const auto cancel = client.cancel_order(OkxCxlRequest{"BTC-USDT", "gw0001"});
     REQUIRE(cancel.is_ok());
     CHECK(cancel.value().s_code == "0");
 
-    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(info.is_ok());
     REQUIRE(info.value().has_value());
     CHECK(info.value()->state == "canceled");
@@ -158,7 +170,7 @@ TEST_CASE("venue error codes surface as Result errors")
     {
         server.set_fill_mode(OkxMockServer::FillMode::Full);
         REQUIRE(client.place_order(limit_buy()).is_ok());
-        const auto result = client.cancel_order(OkxCxlRequest{"BTC-USDT", "gw-0001"});
+        const auto result = client.cancel_order(OkxCxlRequest{"BTC-USDT", "gw0001"});
         REQUIRE_FALSE(result.is_ok());
         CHECK(result.error().code == "venue:51017");
     }
@@ -170,6 +182,15 @@ TEST_CASE("venue error codes surface as Result errors")
         REQUIRE_FALSE(result.is_ok());
         CHECK(result.error().code == "venue:51000");
         CHECK(result.error().message.find("duplicate") != std::string::npos);
+    }
+
+    SUBCASE("non-alphanumeric client order id")
+    {
+        OkxPlaceRequest request = limit_buy();
+        request.cl_ord_id = "gw-0001";
+        const auto result = client.place_order(request);
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:51000");
     }
 
     SUBCASE("unknown instrument")
@@ -191,15 +212,16 @@ TEST_CASE("venue error codes surface as Result errors")
     }
 }
 
-TEST_CASE("order-info returns nullopt for unknown orders")
+TEST_CASE("order-info surfaces venue error 51603 for unknown orders")
 {
     OkxMockServer server(base_config());
     server.start();
     const auto client = fixed_clock_client(config_for(server));
 
     const auto result = client.get_order(OkxQuery{"BTC-USDT", "ghost"});
-    REQUIRE(result.is_ok());
-    CHECK_FALSE(result.value().has_value());
+    REQUIRE_FALSE(result.is_ok());
+    CHECK(result.error().code == "venue:51603");
+    CHECK(result.error().message.find("does not exist") != std::string::npos);
 }
 
 TEST_CASE("amend updates a live order")
@@ -210,11 +232,11 @@ TEST_CASE("amend updates a live order")
 
     REQUIRE(client.place_order(limit_buy()).is_ok());
     const auto amend = client.amend_order(OkxAmendRequest{
-        .inst_id = "BTC-USDT", .cl_ord_id = "gw-0001", .new_px = "51000", .new_sz = std::nullopt});
+        .inst_id = "BTC-USDT", .cl_ord_id = "gw0001", .new_px = "51000", .new_sz = std::nullopt});
     REQUIRE(amend.is_ok());
     CHECK(amend.value().s_code == "0");
 
-    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw-0001"});
+    const auto info = client.get_order(OkxQuery{"BTC-USDT", "gw0001"});
     REQUIRE(info.is_ok());
     REQUIRE(info.value().has_value());
     CHECK(info.value()->px == "51000");
@@ -227,7 +249,7 @@ TEST_CASE("amend with no changes fails client-side without touching the network"
     const auto client = fixed_clock_client(config_for(server));
 
     const auto result =
-        client.amend_order(OkxAmendRequest{"BTC-USDT", "gw-0001", std::nullopt, std::nullopt});
+        client.amend_order(OkxAmendRequest{"BTC-USDT", "gw0001", std::nullopt, std::nullopt});
     REQUIRE_FALSE(result.is_ok());
     CHECK(result.error().code == "protocol");
     CHECK(server.recorded_requests().empty());
@@ -252,7 +274,7 @@ TEST_CASE("amend on unknown or terminal orders is rejected by the venue")
         server.set_fill_mode(OkxMockServer::FillMode::Full);
         REQUIRE(client.place_order(limit_buy()).is_ok());
         const auto result =
-            client.amend_order(OkxAmendRequest{"BTC-USDT", "gw-0001", "51000", std::nullopt});
+            client.amend_order(OkxAmendRequest{"BTC-USDT", "gw0001", "51000", std::nullopt});
         REQUIRE_FALSE(result.is_ok());
         CHECK(result.error().code == "venue:51017");
     }
