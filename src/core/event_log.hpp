@@ -60,9 +60,9 @@ class EventLog
     ///   last accepted offset so appends stay clean;
     /// - unparsable or non-object COMPLETE line: "persistence" error
     ///   (mid-file corruption — fail rather than guess).
-    [[nodiscard]] static auto replay(const std::filesystem::path& a_path,
-                                     const std::function<void(const nlohmann::json&)>& a_sink)
-        -> Result<ReplayStats>;
+    [[nodiscard]] static auto
+    replay(const std::filesystem::path& a_path,
+           const std::function<void(const nlohmann::json&)>& a_sink) -> Result<ReplayStats>;
 
   private:
     std::filesystem::path path_;

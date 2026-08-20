@@ -62,4 +62,11 @@ inline constexpr int kMaxInternalScale = 16;
 /// Error on 64-bit overflow.
 [[nodiscard]] auto mul(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>;
 
+/// Exact division a_lhs / a_rhs computed at up to a_max_scale fractional
+/// digits, rounding half away from zero at the cut, then normalized.
+/// Errors ("protocol"): a_rhs is zero, or the result does not fit 64 bits
+/// at a_max_scale (e.g. tiny divisors).
+[[nodiscard]] auto div(const Decimal& a_lhs, const Decimal& a_rhs,
+                       int a_max_scale) -> Result<Decimal>;
+
 } // namespace gateway

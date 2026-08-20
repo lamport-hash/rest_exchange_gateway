@@ -63,8 +63,7 @@ auto overflow_error(const char* a_op) -> Error
 auto parse_decimal(std::string_view a_text) -> Result<Decimal>
 {
     if (!a_text.empty() && a_text.front() == '-') {
-        return Error{"protocol",
-                     "negative values are not accepted here: " + std::string(a_text)};
+        return Error{"protocol", "negative values are not accepted here: " + std::string(a_text)};
     }
     return parse_signed_decimal(a_text);
 }
@@ -103,9 +102,8 @@ auto parse_signed_decimal(std::string_view a_text) -> Result<Decimal>
             return invalid();
         }
         if (in_fraction && scale >= kMaxDecimalScale) {
-            return Error{"protocol",
-                         "more than " + std::to_string(kMaxDecimalScale) +
-                             " fractional digits: " + std::string(a_text)};
+            return Error{"protocol", "more than " + std::to_string(kMaxDecimalScale) +
+                                         " fractional digits: " + std::string(a_text)};
         }
         const int digit = c - '0';
         if (__builtin_mul_overflow(unscaled, 10, &unscaled) ||
@@ -120,8 +118,7 @@ auto parse_signed_decimal(std::string_view a_text) -> Result<Decimal>
     if (!any_digit) {
         return invalid();
     }
-    return normalized(
-        Decimal{.unscaled = negative ? -unscaled : unscaled, .scale = scale});
+    return normalized(Decimal{.unscaled = negative ? -unscaled : unscaled, .scale = scale});
 }
 
 auto decimal_to_string(const Decimal& a_value) -> std::string
@@ -165,9 +162,8 @@ auto add(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>
     if (!fits_ll(sum)) {
         return overflow_error("add");
     }
-    return normalized(
-        Decimal{.unscaled = static_cast<long long>(sum),
-                .scale = std::max(a_lhs.scale, a_rhs.scale)});
+    return normalized(Decimal{.unscaled = static_cast<long long>(sum),
+                              .scale = std::max(a_lhs.scale, a_rhs.scale)});
 }
 
 auto sub(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>
@@ -177,9 +173,8 @@ auto sub(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>
     if (!fits_ll(difference)) {
         return overflow_error("sub");
     }
-    return normalized(
-        Decimal{.unscaled = static_cast<long long>(difference),
-                .scale = std::max(a_lhs.scale, a_rhs.scale)});
+    return normalized(Decimal{.unscaled = static_cast<long long>(difference),
+                              .scale = std::max(a_lhs.scale, a_rhs.scale)});
 }
 
 auto sub_clamped_zero(const Decimal& a_lhs, const Decimal& a_rhs) -> Decimal
@@ -188,9 +183,8 @@ auto sub_clamped_zero(const Decimal& a_lhs, const Decimal& a_rhs) -> Decimal
     if (lhs <= rhs) {
         return Decimal{};
     }
-    return normalized(
-        Decimal{.unscaled = static_cast<long long>(lhs - rhs),
-                .scale = std::max(a_lhs.scale, a_rhs.scale)});
+    return normalized(Decimal{.unscaled = static_cast<long long>(lhs - rhs),
+                              .scale = std::max(a_lhs.scale, a_rhs.scale)});
 }
 
 auto mul(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>
@@ -199,8 +193,42 @@ auto mul(const Decimal& a_lhs, const Decimal& a_rhs) -> Result<Decimal>
     if (!fits_ll(product)) {
         return overflow_error("mul");
     }
-    return normalized(Decimal{.unscaled = static_cast<long long>(product),
-                              .scale = a_lhs.scale + a_rhs.scale});
+    return normalized(
+        Decimal{.unscaled = static_cast<long long>(product), .scale = a_lhs.scale + a_rhs.scale});
+}
+
+auto div(const Decimal& a_lhs, const Decimal& a_rhs, int a_max_scale) -> Result<Decimal>
+{
+    if (a_rhs.unscaled == 0) {
+        return Error{"protocol", "decimal div by zero"};
+    }
+    if (a_max_scale < 0 || a_max_scale > kMaxInternalScale) {
+        return Error{"protocol", "decimal div scale out of range"};
+    }
+
+    // numerator = lhs scaled to (max(lhs.scale, rhs.scale) + a_max_scale)
+    // fractional digits so the integer quotient carries a_max_scale extra
+    // digits; Wide holds it: |lhs.unscaled| * 10^16 <= 9.3e34 < 1.7e38.
+    const int common = std::max(a_lhs.scale, a_rhs.scale);
+    const Wide scaled_lhs =
+        static_cast<Wide>(a_lhs.unscaled) * pow10(common - a_lhs.scale + a_max_scale);
+    const Wide scaled_rhs = static_cast<Wide>(a_rhs.unscaled) * pow10(common - a_rhs.scale);
+
+    const bool negative = (scaled_lhs < 0) != (scaled_rhs < 0);
+    const Wide lhs_magnitude = scaled_lhs < 0 ? -scaled_lhs : scaled_lhs;
+    const Wide rhs_magnitude = scaled_rhs < 0 ? -scaled_rhs : scaled_rhs;
+
+    Wide quotient = lhs_magnitude / rhs_magnitude;
+    const Wide remainder = lhs_magnitude % rhs_magnitude;
+    // round half away from zero
+    if (remainder * 2 >= rhs_magnitude) {
+        ++quotient;
+    }
+    if (!fits_ll(negative ? -quotient : quotient)) {
+        return overflow_error("div");
+    }
+    return normalized(Decimal{.unscaled = static_cast<long long>(negative ? -quotient : quotient),
+                              .scale = a_max_scale});
 }
 
 } // namespace gateway

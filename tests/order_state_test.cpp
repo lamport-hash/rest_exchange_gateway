@@ -11,8 +11,8 @@ using namespace gateway;
 
 auto all_states() -> std::vector<OrderState>
 {
-    return {OrderState::Live,         OrderState::PartiallyFilled, OrderState::Filled,
-            OrderState::Canceled,     OrderState::Rejected};
+    return {OrderState::Live, OrderState::PartiallyFilled, OrderState::Filled, OrderState::Canceled,
+            OrderState::Rejected};
 }
 
 } // namespace

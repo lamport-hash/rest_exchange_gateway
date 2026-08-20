@@ -15,8 +15,7 @@ auto limits_from_json(const nlohmann::json& a_node) -> Result<InstrumentRiskLimi
         return Error{"protocol", "risk limits block must be a JSON object"};
     }
     InstrumentRiskLimits limits;
-    const auto read = [&a_node](const char* a_name, std::string& a_target)
-        -> std::optional<Error> {
+    const auto read = [&a_node](const char* a_name, std::string& a_target) -> std::optional<Error> {
         const auto it = a_node.find(a_name);
         if (it == a_node.end() || it->is_null()) {
             return std::nullopt;
@@ -115,8 +114,7 @@ auto check_risk(const std::optional<InstrumentRiskLimits>& a_limits, std::string
         }
         if (compare(quantity.value(), max_qty.value()) > 0) {
             return Error{"risk_max_qty", "quantity " + a_order.quantity + " exceeds maxQty " +
-                                             a_limits->max_qty + " for " +
-                                             std::string{a_symbol}};
+                                             a_limits->max_qty + " for " + std::string{a_symbol}};
         }
     }
 
@@ -134,11 +132,11 @@ auto check_risk(const std::optional<InstrumentRiskLimits>& a_limits, std::string
             return Error{"risk_invalid_value", "notional computation overflowed"};
         }
         if (compare(notional.value(), max_notional.value()) > 0) {
-            return Error{"risk_max_notional",
-                         "notional " + decimal_to_string(notional.value()) + " (price " +
-                             a_order.price + " x quantity " + a_order.quantity +
-                             ") exceeds maxNotional " + a_limits->max_notional + " for " +
-                             std::string{a_symbol}};
+            return Error{"risk_max_notional", "notional " + decimal_to_string(notional.value()) +
+                                                  " (price " + a_order.price + " x quantity " +
+                                                  a_order.quantity + ") exceeds maxNotional " +
+                                                  a_limits->max_notional + " for " +
+                                                  std::string{a_symbol}};
         }
     }
 
@@ -151,8 +149,8 @@ auto check_risk(const std::optional<InstrumentRiskLimits>& a_limits, std::string
         if (!max_position.is_ok()) {
             return invalid("maxPosition", a_limits->max_position);
         }
-        const auto magnitude = position.value().unscaled < 0 ? negate(position.value())
-                                                             : position.value();
+        const auto magnitude =
+            position.value().unscaled < 0 ? negate(position.value()) : position.value();
         if (compare(magnitude, max_position.value()) > 0) {
             return Error{"risk_max_position",
                          "projected position " + decimal_to_string(position.value()) +

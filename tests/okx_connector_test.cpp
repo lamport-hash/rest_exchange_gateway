@@ -169,7 +169,8 @@ TEST_CASE("amend updates price through the interface")
 
     REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
     const auto amend = connector_interface.amend_order(
-        AmendRequest{"gw0001", "BTC-USDT", std::string("51000"), std::nullopt});
+        AmendRequest{"gw0001", "BTC-USDT", std::string("51000"), std::nullopt, Side::Buy,
+                     OrderType::Limit, "GTC"});
     REQUIRE(amend.is_ok());
 
     const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
@@ -206,16 +207,19 @@ TEST_CASE("side and type map to OKX wire values")
     CHECK(nlohmann::json::parse(server.recorded_requests().back().body).at("side") == "sell");
 }
 
-TEST_CASE("get_order surfaces the venue 51603 error for orders the venue never saw")
+TEST_CASE("get_order: unknown order is a conclusive absence (nullopt), not an error")
 {
     OkxMockServer server(base_config());
     server.start();
     OkxConnector connector = make_connector(server);
     ExchangeConnector& connector_interface = connector;
 
+    // OKX reports "51603 The order does not exist"; the venue-agnostic
+    // contract maps conclusive absence to std::nullopt so the core treats
+    // every exchange identically (Binance -2013 behaves the same way).
     const auto snapshot = connector_interface.get_order(OrderQuery{"ghost", "BTC-USDT"});
-    REQUIRE_FALSE(snapshot.is_ok());
-    CHECK(snapshot.error().code == "venue:51603");
+    REQUIRE(snapshot.is_ok());
+    REQUIRE(snapshot.value().has_value() == false);
 }
 
 TEST_CASE("venue errors pass through the interface unchanged")
@@ -237,8 +241,8 @@ TEST_CASE("amend with no changes is rejected before the network")
     OkxConnector connector = make_connector(server);
     ExchangeConnector& connector_interface = connector;
 
-    const auto result = connector_interface.amend_order(
-        AmendRequest{"gw0001", "BTC-USDT", std::nullopt, std::nullopt});
+    const auto result = connector_interface.amend_order(AmendRequest{
+        "gw0001", "BTC-USDT", std::nullopt, std::nullopt, Side::Buy, OrderType::Limit, "GTC"});
     REQUIRE_FALSE(result.is_ok());
     CHECK(result.error().code == "protocol");
     CHECK(server.recorded_requests().empty());
@@ -446,7 +450,8 @@ TEST_CASE("dropped amend response re-sends until the price matches")
     REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
     server.drop_next_request();
     const auto amend = connector_interface.amend_order(
-        AmendRequest{"gw0001", "BTC-USDT", std::string("51000"), std::nullopt});
+        AmendRequest{"gw0001", "BTC-USDT", std::string("51000"), std::nullopt, Side::Buy,
+                     OrderType::Limit, "GTC"});
     REQUIRE(amend.is_ok());
 
     const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
