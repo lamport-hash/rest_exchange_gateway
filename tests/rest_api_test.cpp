@@ -30,7 +30,9 @@ auto base_config() -> OkxConfig
                      .host = "127.0.0.1",
                      .port = 0,
                      .use_tls = false,
-                     .demo_trading = true};
+                     .demo_trading = true,
+                     .retry = gateway::RetryPolicy{},
+                     .ws = gateway::exchange::okx::OkxWsConfig{}};
 }
 
 class GatewayFixture
@@ -265,22 +267,17 @@ TEST_CASE("venue errors map to structured responses")
 {
     GatewayFixture fixture;
 
-    SUBCASE("duplicate clientOrderId becomes 409 venue_rejected")
+    SUBCASE("a retried place with the same clientOrderId yields the same order")
     {
-        const auto first = fixture.client().Post(
-            "/orders",
-            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
-            "application/json");
+        const auto body =
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})";
+        const auto first = fixture.client().Post("/orders", body, "application/json");
         REQUIRE(first->status == 201);
-
-        const auto second = fixture.client().Post(
-            "/orders",
-            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
-            "application/json");
-        REQUIRE(second->status == 409);
-        const auto error = error_body(second)["error"];
-        CHECK(error["code"] == "venue_rejected");
-        CHECK(error["clientOrderId"] == "gw0001");
+        const auto second = fixture.client().Post("/orders", body, "application/json");
+        REQUIRE(second->status == 201);
+        const auto first_json = nlohmann::json::parse(first->body);
+        const auto second_json = nlohmann::json::parse(second->body);
+        CHECK(second_json["exchangeOrderId"] == first_json["exchangeOrderId"]);
     }
 
     SUBCASE("unknown order on GET becomes 404 not_found")
@@ -298,6 +295,39 @@ TEST_CASE("venue errors map to structured responses")
         REQUIRE(res->status == 404);
         CHECK(error_body(res)["error"]["code"] == "not_found");
     }
+
+    SUBCASE("cancelling twice both succeed (idempotent cancel)")
+    {
+        const auto place = fixture.client().Post(
+            "/orders",
+            R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+            "application/json");
+        REQUIRE(place->status == 201);
+
+        const auto first = fixture.client().Delete("/orders/gw0001?instrumentId=BTC-USDT");
+        REQUIRE(first->status == 200);
+        const auto second = fixture.client().Delete("/orders/gw0001?instrumentId=BTC-USDT");
+        REQUIRE(second->status == 200);
+        CHECK(nlohmann::json::parse(second->body)["exchangeOrderId"] == "mock-1");
+    }
+}
+
+TEST_CASE("a dropped venue response is retried transparently behind the REST API")
+{
+    GatewayFixture fixture;
+    fixture.mock().drop_next_request();
+
+    const auto res = fixture.client().Post(
+        "/orders",
+        R"({"clientOrderId":"gw0001","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+        "application/json");
+    REQUIRE(res->status == 201);
+    CHECK(nlohmann::json::parse(res->body)["exchangeOrderId"] == "mock-1");
+
+    // the venue ends up with exactly one live order (no double placement)
+    const auto get = fixture.client().Get("/orders/gw0001?instrumentId=BTC-USDT");
+    REQUIRE(get->status == 200);
+    CHECK(nlohmann::json::parse(get->body)["state"] == "live");
 }
 
 TEST_CASE("venue connectivity problems become 502 venue_unavailable")

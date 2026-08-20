@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gateway/exchange_connector.hpp"
 #include "gateway/result.hpp"
 
 #include <nlohmann/json.hpp>
@@ -84,5 +85,10 @@ struct OkxOrderInfo
 
 /// Percent-encode for query components (RFC 3986 unreserved set kept as-is).
 [[nodiscard]] auto url_encode(std::string_view a_value) -> std::string;
+
+/// Map an OKX order state string ("live", "partially_filled", "filled",
+/// "canceled") to the normalized OrderState. Returns std::nullopt for
+/// unknown/unsupported states. Shared by the REST codec and the WS feed.
+[[nodiscard]] auto map_okx_state(std::string_view a_state) -> std::optional<OrderState>;
 
 } // namespace gateway::exchange::okx

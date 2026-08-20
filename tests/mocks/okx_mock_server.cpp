@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -183,6 +185,83 @@ void OkxMockServer::set_next_raw_response(int a_status, std::string a_body)
     raw_body_ = std::move(a_body);
 }
 
+void OkxMockServer::drop_next_request()
+{
+    const std::lock_guard lock(mutex_);
+    ++drop_next_;
+}
+
+void OkxMockServer::drop_next_response()
+{
+    const std::lock_guard lock(mutex_);
+    drop_next_response_ = true;
+}
+
+void OkxMockServer::respond_success(httplib::Response& a_res, const std::string& a_body)
+{
+    bool drop = false;
+    {
+        const std::lock_guard lock(mutex_);
+        drop = drop_next_response_;
+        drop_next_response_ = false;
+    }
+    if (drop) {
+        a_res.status = 200;
+        a_res.set_chunked_content_provider("application/json",
+                                           [](std::uint64_t, httplib::DataSink& a_sink) -> bool {
+                                               a_sink.write("{\"partial\":", 11);
+                                               return false; // abort: connection closed mid-body
+                                           });
+        return;
+    }
+    a_res.set_content(a_body, "application/json");
+}
+
+void OkxMockServer::delay_next_request(unsigned a_ms)
+{
+    const std::lock_guard lock(mutex_);
+    delay_next_ms_ = a_ms;
+}
+
+auto OkxMockServer::begin_request(const httplib::Request& a_req, std::string_view a_body,
+                                  httplib::Response& a_res) -> bool
+{
+    unsigned delay_ms = 0;
+    bool drop = false;
+    {
+        const std::lock_guard lock(mutex_);
+        record(a_req, a_body);
+        if (raw_status_ != 0) {
+            a_res.status = raw_status_;
+            a_res.set_content(raw_body_, "application/json");
+            raw_status_ = 0;
+            return true;
+        }
+        if (drop_next_ > 0) {
+            --drop_next_;
+            drop = true;
+        }
+        if (delay_next_ms_ > 0) {
+            delay_ms = delay_next_ms_;
+            delay_next_ms_ = 0;
+        }
+    }
+
+    if (delay_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{delay_ms});
+    }
+    if (drop) {
+        a_res.status = 200;
+        a_res.set_chunked_content_provider("application/json",
+                                           [](std::uint64_t, httplib::DataSink& a_sink) -> bool {
+                                               a_sink.write("{\"partial\":", 11);
+                                               return false; // abort: connection closed mid-body
+                                           });
+        return true;
+    }
+    return false;
+}
+
 auto OkxMockServer::recorded_requests() const -> std::vector<RecordedRequest>
 {
     const std::lock_guard lock(mutex_);
@@ -232,23 +311,14 @@ void OkxMockServer::register_routes()
 {
     server_.Post("/api/v5/trade/order", [this](const httplib::Request& req,
                                                httplib::Response& res) {
-        std::string body = req.body;
-        std::optional<std::string> error;
-
-        {
-            const std::lock_guard lock(mutex_);
-            record(req, body);
-            if (raw_status_ != 0) {
-                res.status = raw_status_;
-                res.set_content(raw_body_, "application/json");
-                raw_status_ = 0;
-                return;
-            }
+        const std::string body = req.body;
+        if (begin_request(req, body, res)) {
+            return;
         }
 
-        error = check_auth(req, body);
-        if (error) {
-            res.set_content(*error, "application/json");
+        const auto auth_error = check_auth(req, body);
+        if (auth_error) {
+            res.set_content(*auth_error, "application/json");
             return;
         }
 
@@ -299,6 +369,7 @@ void OkxMockServer::register_routes()
             return;
         }
 
+        std::string reply;
         {
             const std::lock_guard lock(mutex_);
             if (const auto it = orders_.find(cl_ord_id);
@@ -330,112 +401,102 @@ void OkxMockServer::register_routes()
             }
             orders_[cl_ord_id] = order;
             const std::string ord_id = order.ord_id;
-            res.set_content(envelope_ok() + ack_item(ord_id, cl_ord_id) + "]}", "application/json");
+            reply = envelope_ok() + ack_item(ord_id, cl_ord_id) + "]}";
         }
+        respond_success(res, reply);
     });
 
-    server_.Post("/api/v5/trade/cancel-order", [this](const httplib::Request& req,
-                                                      httplib::Response& res) {
-        std::string body = req.body;
-        {
-            const std::lock_guard lock(mutex_);
-            record(req, body);
-            if (raw_status_ != 0) {
-                res.status = raw_status_;
-                res.set_content(raw_body_, "application/json");
-                raw_status_ = 0;
+    server_.Post(
+        "/api/v5/trade/cancel-order", [this](const httplib::Request& req, httplib::Response& res) {
+            const std::string body = req.body;
+            if (begin_request(req, body, res)) {
                 return;
             }
-        }
 
-        const auto error = check_auth(req, body);
-        if (error) {
-            res.set_content(*error, "application/json");
-            return;
-        }
-
-        const auto json = nlohmann::json::parse(body, nullptr, false);
-        const auto str = [&json](const char* a_name) {
-            const auto it = json.find(a_name);
-            return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
-        };
-        const std::string cl_ord_id = str("clOrdId");
-
-        const std::lock_guard lock(mutex_);
-        const auto it = orders_.find(cl_ord_id);
-        if (it == orders_.end()) {
-            res.set_content(envelope_error("51016", "Order does not exist"), "application/json");
-            return;
-        }
-        if (it->second.state == "canceled" || it->second.state == "filled") {
-            res.set_content(envelope_error("51017", "Order status is done"), "application/json");
-            return;
-        }
-        it->second.state = "canceled";
-        res.set_content(envelope_ok() + ack_item(it->second.ord_id, cl_ord_id) + "]}",
-                        "application/json");
-    });
-
-    server_.Post("/api/v5/trade/amend-order", [this](const httplib::Request& req,
-                                                     httplib::Response& res) {
-        std::string body = req.body;
-        {
-            const std::lock_guard lock(mutex_);
-            record(req, body);
-            if (raw_status_ != 0) {
-                res.status = raw_status_;
-                res.set_content(raw_body_, "application/json");
-                raw_status_ = 0;
+            const auto error = check_auth(req, body);
+            if (error) {
+                res.set_content(*error, "application/json");
                 return;
             }
-        }
 
-        const auto error = check_auth(req, body);
-        if (error) {
-            res.set_content(*error, "application/json");
-            return;
-        }
+            const auto json = nlohmann::json::parse(body, nullptr, false);
+            const auto str = [&json](const char* a_name) {
+                const auto it = json.find(a_name);
+                return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
+            };
+            const std::string cl_ord_id = str("clOrdId");
 
-        const auto json = nlohmann::json::parse(body, nullptr, false);
-        const auto str = [&json](const char* a_name) {
-            const auto it = json.find(a_name);
-            return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
-        };
-        const std::string cl_ord_id = str("clOrdId");
-        const std::string new_px = str("newPx");
-        const std::string new_sz = str("newSz");
+            std::string reply;
+            {
+                const std::lock_guard lock(mutex_);
+                const auto it = orders_.find(cl_ord_id);
+                if (it == orders_.end()) {
+                    res.set_content(envelope_error("51016", "Order does not exist"),
+                                    "application/json");
+                    return;
+                }
+                if (it->second.state == "canceled" || it->second.state == "filled") {
+                    res.set_content(envelope_error("51017", "Order status is done"),
+                                    "application/json");
+                    return;
+                }
+                it->second.state = "canceled";
+                reply = envelope_ok() + ack_item(it->second.ord_id, cl_ord_id) + "]}";
+            }
+            respond_success(res, reply);
+        });
 
-        const std::lock_guard lock(mutex_);
-        const auto it = orders_.find(cl_ord_id);
-        if (it == orders_.end()) {
-            res.set_content(envelope_error("51016", "Order does not exist"), "application/json");
-            return;
-        }
-        if (it->second.state == "canceled" || it->second.state == "filled") {
-            res.set_content(envelope_error("51017", "Order status is done"), "application/json");
-            return;
-        }
-        if (!new_px.empty()) {
-            it->second.px = new_px;
-        }
-        if (!new_sz.empty()) {
-            it->second.sz = new_sz;
-        }
-        res.set_content(envelope_ok() + ack_item(it->second.ord_id, cl_ord_id) + "]}",
-                        "application/json");
-    });
+    server_.Post(
+        "/api/v5/trade/amend-order", [this](const httplib::Request& req, httplib::Response& res) {
+            const std::string body = req.body;
+            if (begin_request(req, body, res)) {
+                return;
+            }
+
+            const auto error = check_auth(req, body);
+            if (error) {
+                res.set_content(*error, "application/json");
+                return;
+            }
+
+            const auto json = nlohmann::json::parse(body, nullptr, false);
+            const auto str = [&json](const char* a_name) {
+                const auto it = json.find(a_name);
+                return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
+            };
+            const std::string cl_ord_id = str("clOrdId");
+            const std::string new_px = str("newPx");
+            const std::string new_sz = str("newSz");
+
+            std::string reply;
+            {
+                const std::lock_guard lock(mutex_);
+                const auto it = orders_.find(cl_ord_id);
+                if (it == orders_.end()) {
+                    res.set_content(envelope_error("51016", "Order does not exist"),
+                                    "application/json");
+                    return;
+                }
+                if (it->second.state == "canceled" || it->second.state == "filled") {
+                    res.set_content(envelope_error("51017", "Order status is done"),
+                                    "application/json");
+                    return;
+                }
+                if (!new_px.empty()) {
+                    it->second.px = new_px;
+                }
+                if (!new_sz.empty()) {
+                    it->second.sz = new_sz;
+                }
+                reply = envelope_ok() + ack_item(it->second.ord_id, cl_ord_id) + "]}";
+            }
+            respond_success(res, reply);
+        });
 
     server_.Get("/api/v5/trade/order", [this](const httplib::Request& req, httplib::Response& res) {
         const std::string body;
-        {
-            const std::lock_guard lock(mutex_);
-            record(req, body);
-            if (raw_status_ != 0) {
-                res.status = raw_status_;
-                res.set_content(raw_body_, "application/json");
-                raw_status_ = 0;
-                return;
-            }
+        if (begin_request(req, body, res)) {
+            return;
         }
 
         const auto error = check_auth(req, body);

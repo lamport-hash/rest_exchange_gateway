@@ -49,4 +49,15 @@ TEST_CASE("sign_request output is always 44-char base64")
     CHECK(sig.back() == '=');
 }
 
+TEST_CASE("sign_ws_login is the documented /users/self/verify signature")
+{
+    using gateway::exchange::okx::sign_ws_login;
+    // sign_ws_login(ts, secret) == sign_request(ts, "GET", "/users/self/verify", "", secret)
+    CHECK(sign_ws_login("2026-08-20T10:00:00.000Z", "22582BD0CFF14C41EDBF1AB98506286D") ==
+          sign_request("2026-08-20T10:00:00.000Z", "GET", "/users/self/verify", "",
+                       "22582BD0CFF14C41EDBF1AB98506286D"));
+    CHECK_FALSE(sign_ws_login("ts", "a").empty());
+    CHECK(sign_ws_login("ts", "a").size() == 44);
+}
+
 } // namespace

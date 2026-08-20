@@ -177,4 +177,112 @@ TEST_CASE("okx_config_from_json rejects non-object sections")
     CHECK(result.error().code == "protocol");
 }
 
+TEST_CASE("okx_config_from_json parses the retry section")
+{
+    const auto section = nlohmann::json::parse(R"({
+        "apiKey": "k", "secretKey": "s", "passphrase": "p",
+        "retry": {"maxAttempts": 5, "initialBackoffMs": 50, "maxBackoffMs": 700,
+                  "multiplier": 3.0, "jitter": 0.25, "budgetMs": 9000}
+    })");
+    const auto result = gateway::exchange::okx::okx_config_from_json(section);
+    REQUIRE(result.is_ok());
+    const auto& retry = result.value().retry;
+    CHECK(retry.max_attempts == 5);
+    CHECK(retry.initial_backoff == std::chrono::milliseconds{50});
+    CHECK(retry.max_backoff == std::chrono::milliseconds{700});
+    CHECK(retry.multiplier == 3.0);
+    CHECK(retry.jitter == 0.25);
+    CHECK(retry.budget == std::chrono::milliseconds{9000});
+}
+
+TEST_CASE("okx retry defaults apply without a retry section")
+{
+    const auto section =
+        nlohmann::json::parse(R"({"apiKey":"k","secretKey":"s","passphrase":"p"})");
+    const auto result = gateway::exchange::okx::okx_config_from_json(section);
+    REQUIRE(result.is_ok());
+    const auto& retry = result.value().retry;
+    CHECK(retry.max_attempts == 3);
+    CHECK(retry.initial_backoff == std::chrono::milliseconds{100});
+    CHECK(retry.max_backoff == std::chrono::milliseconds{2000});
+    CHECK(retry.budget == std::chrono::milliseconds{5000});
+}
+
+TEST_CASE("okx retry section validation errors surface")
+{
+    const auto parse = [](const std::string& a_retry) {
+        return gateway::exchange::okx::okx_config_from_json(nlohmann::json::parse(
+            R"({"apiKey":"k","secretKey":"s","passphrase":"p","retry":)" + a_retry + "}"));
+    };
+    CHECK_FALSE(parse(R"({"maxAttempts":0})").is_ok());
+    CHECK_FALSE(parse(R"({"jitter":2.0})").is_ok());
+    CHECK_FALSE(parse(R"([1])").is_ok());
+}
+
+TEST_CASE("okx_config_from_json parses the ws section")
+{
+    const auto section = nlohmann::json::parse(R"({
+        "apiKey": "k", "secretKey": "s", "passphrase": "p",
+        "ws": {"enabled": false, "host": "127.0.0.1", "port": 9001, "useTls": false,
+               "path": "/ws/v5/private", "pingIntervalMs": 15000, "maxMissedPongs": 3}
+    })");
+    const auto result = gateway::exchange::okx::okx_config_from_json(section);
+    REQUIRE(result.is_ok());
+    const auto& ws = result.value().ws;
+    CHECK_FALSE(ws.enabled);
+    CHECK(ws.host == "127.0.0.1");
+    CHECK(ws.port == 9001);
+    CHECK_FALSE(ws.use_tls);
+    CHECK(ws.path == "/ws/v5/private");
+    CHECK(ws.ping_interval == std::chrono::milliseconds{15000});
+    CHECK(ws.max_missed_pongs == 3);
+}
+
+TEST_CASE("okx ws defaults point at the production private endpoint")
+{
+    const auto section =
+        nlohmann::json::parse(R"({"apiKey":"k","secretKey":"s","passphrase":"p"})");
+    const auto result = gateway::exchange::okx::okx_config_from_json(section);
+    REQUIRE(result.is_ok());
+    const auto& ws = result.value().ws;
+    CHECK(ws.enabled);
+    CHECK(ws.host == "ws.okx.com");
+    CHECK(ws.port == 8443);
+    CHECK(ws.use_tls);
+    CHECK(ws.path == "/ws/v5/private");
+    CHECK(ws.ping_interval == std::chrono::milliseconds{20000});
+    CHECK(ws.max_missed_pongs == 2);
+}
+
+TEST_CASE("okx ws section validation errors surface")
+{
+    const auto parse = [](const std::string& a_ws) {
+        return gateway::exchange::okx::okx_config_from_json(nlohmann::json::parse(
+            R"({"apiKey":"k","secretKey":"s","passphrase":"p","ws":)" + a_ws + "}"));
+    };
+    CHECK_FALSE(parse(R"({"enabled":"yes"})").is_ok());
+    CHECK_FALSE(parse(R"({"port":0})").is_ok());
+    CHECK_FALSE(parse(R"({"port":70000})").is_ok());
+    CHECK_FALSE(parse(R"({"useTls":1})").is_ok());
+    CHECK_FALSE(parse(R"({"pingIntervalMs":0})").is_ok());
+    CHECK_FALSE(parse(R"({"maxMissedPongs":0})").is_ok());
+    CHECK_FALSE(parse(R"("nope")").is_ok());
+}
+
+TEST_CASE("okx rest timeout overrides are validated")
+{
+    const auto parse = [](const std::string& a_extra) {
+        return gateway::exchange::okx::okx_config_from_json(nlohmann::json::parse(
+            R"({"apiKey":"k","secretKey":"s","passphrase":"p",)" + a_extra + "}"));
+    };
+    const auto ok = parse(R"("restConnectTimeoutMs":250,"restReadTimeoutMs":300)");
+    REQUIRE(ok.is_ok());
+    CHECK(ok.value().rest_connect_timeout_ms == 250);
+    CHECK(ok.value().rest_read_timeout_ms == 300);
+
+    CHECK_FALSE(parse(R"("restReadTimeoutMs":0)").is_ok());
+    CHECK_FALSE(parse(R"("restReadTimeoutMs":"500")").is_ok());
+    CHECK_FALSE(parse(R"("restConnectTimeoutMs":-1)").is_ok());
+}
+
 } // namespace

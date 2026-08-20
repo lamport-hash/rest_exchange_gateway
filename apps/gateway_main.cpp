@@ -1,8 +1,11 @@
+#include "core/clock.hpp"
 #include "core/config.hpp"
 #include "exchange/okx/okx_connector.hpp"
+#include "gateway/exchange_connector.hpp"
 #include "rest/order_routes.hpp"
 
 #include <crow_all.h>
+#include <nlohmann/json.hpp>
 
 #include <format>
 #include <iostream>
@@ -29,6 +32,17 @@ auto main(int a_argc, char* a_argv[]) -> int
     const gateway::exchange::okx::OkxConfig venue_config = okx_config.value();
     gateway::exchange::okx::OkxConnector connector{venue_config};
 
+    connector.set_execution_report_handler([](const gateway::ExecutionReport& a_report) {
+        const nlohmann::json line = {{"ts", gateway::utc_now_iso_ms()},
+                                     {"event", "execution_report"},
+                                     {"clientOrderId", a_report.client_order_id},
+                                     {"exchangeOrderId", a_report.exchange_order_id},
+                                     {"state", gateway::to_string(a_report.state)},
+                                     {"filledQuantity", a_report.filled_quantity},
+                                     {"averageFillPrice", a_report.average_fill_price}};
+        std::cout << line.dump() << '\n';
+    });
+
     crow::SimpleApp app;
     gateway::rest::register_order_routes(app, connector);
 
@@ -39,8 +53,12 @@ auto main(int a_argc, char* a_argv[]) -> int
         return crow::response(body);
     });
 
-    std::cout << std::format("rest_exchange_gateway listening on port {}\n",
-                             config.value().rest_port);
+    connector.start();
+    std::cout << std::format("rest_exchange_gateway listening on port {} (okx feed {})\n",
+                             config.value().rest_port,
+                             venue_config.ws.enabled ? "enabled" : "disabled");
     app.port(config.value().rest_port).concurrency(2).loglevel(crow::LogLevel::Warning).run();
+
+    connector.stop();
     return 0;
 }
