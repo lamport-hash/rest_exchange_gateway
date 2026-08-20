@@ -68,6 +68,12 @@ target_link_libraries(gateway_okx PUBLIC gateway_core)
 if(GATEWAY_BUILD_TESTS)
     enable_testing()
 
+    add_library(gateway_test_support STATIC
+        tests/mocks/okx_mock_server.cpp
+    )
+    target_include_directories(gateway_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(gateway_test_support PUBLIC gateway_okx)
+
     add_executable(smoke_test tests/smoke_test.cpp)
     target_include_directories(smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(smoke_test PRIVATE gateway_warnings gateway_third_party)
@@ -92,4 +98,8 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(okx_wire_test tests/okx_wire_test.cpp)
     target_link_libraries(okx_wire_test PRIVATE gateway_okx)
     add_test(NAME okx_wire_test COMMAND okx_wire_test)
+
+    add_executable(okx_rest_client_test tests/okx_rest_client_test.cpp)
+    target_link_libraries(okx_rest_client_test PRIVATE gateway_test_support)
+    add_test(NAME okx_rest_client_test COMMAND okx_rest_client_test)
 endif()
