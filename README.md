@@ -1,2 +1,2 @@
 # rest_exchange_gateway
-exchange-agnostic REST API
+exchange-agnostic order REST API
