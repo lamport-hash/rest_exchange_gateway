@@ -27,7 +27,7 @@ auto base_config() -> OkxConfig
 
 auto limit_buy() -> OrderRequest
 {
-    return OrderRequest{.client_order_id = "gw-0001",
+    return OrderRequest{.client_order_id = "gw0001",
                         .instrument_id = "BTC-USDT",
                         .side = Side::Buy,
                         .type = OrderType::Limit,
@@ -51,10 +51,10 @@ TEST_CASE("place then get through the ExchangeConnector interface")
 
     const auto placement = connector_interface.place_order(limit_buy());
     REQUIRE(placement.is_ok());
-    CHECK(placement.value().client_order_id == "gw-0001");
+    CHECK(placement.value().client_order_id == "gw0001");
     CHECK(placement.value().exchange_order_id == "mock-1");
 
-    const auto snapshot = connector_interface.get_order(OrderQuery{"gw-0001", "BTC-USDT"});
+    const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
     REQUIRE(snapshot.is_ok());
     REQUIRE(snapshot.value().has_value());
     CHECK(snapshot.value()->state == OrderState::Live);
@@ -72,9 +72,9 @@ TEST_CASE("partial fill surfaces as PartiallyFilled snapshot")
     ExchangeConnector& connector_interface = connector;
 
     REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
-    server.apply_fill("gw-0001", "0.0004", "49999.5");
+    server.apply_fill("gw0001", "0.0004", "49999.5");
 
-    const auto snapshot = connector_interface.get_order(OrderQuery{"gw-0001", "BTC-USDT"});
+    const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
     REQUIRE(snapshot.is_ok());
     REQUIRE(snapshot.value().has_value());
     CHECK(snapshot.value()->state == OrderState::PartiallyFilled);
@@ -90,11 +90,11 @@ TEST_CASE("cancel transitions the snapshot to Canceled")
     ExchangeConnector& connector_interface = connector;
 
     REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
-    const auto cancel = connector_interface.cancel_order(CancelRequest{"gw-0001", "BTC-USDT"});
+    const auto cancel = connector_interface.cancel_order(CancelRequest{"gw0001", "BTC-USDT"});
     REQUIRE(cancel.is_ok());
     CHECK(cancel.value().exchange_order_id == "mock-1");
 
-    const auto snapshot = connector_interface.get_order(OrderQuery{"gw-0001", "BTC-USDT"});
+    const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
     REQUIRE(snapshot.is_ok());
     REQUIRE(snapshot.value().has_value());
     CHECK(snapshot.value()->state == OrderState::Canceled);
@@ -109,10 +109,10 @@ TEST_CASE("amend updates price through the interface")
 
     REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
     const auto amend = connector_interface.amend_order(
-        AmendRequest{"gw-0001", "BTC-USDT", std::string("51000"), std::nullopt});
+        AmendRequest{"gw0001", "BTC-USDT", std::string("51000"), std::nullopt});
     REQUIRE(amend.is_ok());
 
-    const auto snapshot = connector_interface.get_order(OrderQuery{"gw-0001", "BTC-USDT"});
+    const auto snapshot = connector_interface.get_order(OrderQuery{"gw0001", "BTC-USDT"});
     REQUIRE(snapshot.is_ok());
     REQUIRE(snapshot.value().has_value());
     CHECK(snapshot.value()->price == "51000");
@@ -126,7 +126,7 @@ TEST_CASE("side and type map to OKX wire values")
     ExchangeConnector& connector_interface = connector;
 
     OrderRequest market_sell = limit_buy();
-    market_sell.client_order_id = "gw-0002";
+    market_sell.client_order_id = "gw0002";
     market_sell.side = Side::Sell;
     market_sell.type = OrderType::Market;
     market_sell.price.clear();
@@ -140,13 +140,13 @@ TEST_CASE("side and type map to OKX wire values")
     CHECK_FALSE(body.contains("px"));
 
     OrderRequest limit = limit_buy();
-    limit.client_order_id = "gw-0003";
+    limit.client_order_id = "gw0003";
     limit.side = Side::Sell;
     REQUIRE(connector_interface.place_order(limit).is_ok());
     CHECK(nlohmann::json::parse(server.recorded_requests().back().body).at("side") == "sell");
 }
 
-TEST_CASE("get_order returns nullopt for orders the venue never saw")
+TEST_CASE("get_order surfaces the venue 51603 error for orders the venue never saw")
 {
     OkxMockServer server(base_config());
     server.start();
@@ -154,8 +154,8 @@ TEST_CASE("get_order returns nullopt for orders the venue never saw")
     ExchangeConnector& connector_interface = connector;
 
     const auto snapshot = connector_interface.get_order(OrderQuery{"ghost", "BTC-USDT"});
-    REQUIRE(snapshot.is_ok());
-    CHECK_FALSE(snapshot.value().has_value());
+    REQUIRE_FALSE(snapshot.is_ok());
+    CHECK(snapshot.error().code == "venue:51603");
 }
 
 TEST_CASE("venue errors pass through the interface unchanged")
@@ -178,7 +178,7 @@ TEST_CASE("amend with no changes is rejected before the network")
     ExchangeConnector& connector_interface = connector;
 
     const auto result = connector_interface.amend_order(
-        AmendRequest{"gw-0001", "BTC-USDT", std::nullopt, std::nullopt});
+        AmendRequest{"gw0001", "BTC-USDT", std::nullopt, std::nullopt});
     REQUIRE_FALSE(result.is_ok());
     CHECK(result.error().code == "protocol");
     CHECK(server.recorded_requests().empty());

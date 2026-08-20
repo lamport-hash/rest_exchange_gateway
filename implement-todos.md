@@ -30,9 +30,14 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       implements it; exchange code confined below the interface
 - [x] 1.5 Thin Crow slice wired end-to-end: POST /orders, GET /orders/{id},
       DELETE /orders/{id} → OKXConnector; structured JSON errors
-- [ ] 1.6 Live validation on OKX demo trading (credentials in config)
+- [x] 1.6 Live validation on OKX demo trading (credentials in config)
       Acceptance: place/cancel/status through the gateway over HTTP on OKX
       demo; mock tests green in both presets
+      (2026-08-20: pass — POST/GET/DELETE /orders + /health against
+      www.okx.com demo; three live-behavior bugs found and fixed: duplicated
+      Content-Type header from httplib emplace semantics, wrong order-info
+      path — correct endpoint is GET /api/v5/trade/order, and clOrdId must be
+      1-32 alphanumeric; mock aligned with live behavior incl. 51603)
 
 ## Phase 2 — Resilience for the OKX connector
 - [ ] 2.1 Exponential backoff + jitter retry policy for REST (configurable

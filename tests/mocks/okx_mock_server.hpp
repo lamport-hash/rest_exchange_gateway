@@ -15,14 +15,16 @@ namespace gateway::testing {
 
 /// In-process mock of the OKX v5 trade REST endpoints, built from the
 /// official docs (POST /api/v5/trade/order, cancel-order, amend-order and
-/// GET /api/v5/trade/order-info). Deterministic: fills happen only when the
+/// GET /api/v5/trade/order). Deterministic: fills happen only when the
 /// test script calls apply_fill()/set_fill_mode(); no timers, no randomness.
 ///
 /// Behavior notes:
 /// - Auth: recomputes the OK-ACCESS-SIGN HMAC with the configured secret and
 ///   rejects mismatches/missing headers with envelope code "50102".
-/// - Unknown instrument -> "51001"; unknown order -> "51016"; terminal
-///   order cancels/amends -> "51017"; validation failures -> "51000".
+/// - Unknown instrument -> "51001"; unknown order -> "51016" (cancel/amend)
+///   or "51603" (get, like live OKX); terminal order cancels/amends ->
+///   "51017"; validation failures -> "51000"; clOrdId must be alphanumeric
+///   up to 32 chars (like live OKX).
 /// - Every received request is recorded for assertions
 ///   (headers, raw target, body).
 class OkxMockServer

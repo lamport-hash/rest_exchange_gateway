@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <utility>
@@ -268,6 +269,17 @@ void OkxMockServer::register_routes()
         const std::string px = str("px");
         const std::string sz = str("sz");
 
+        const auto valid_cl_ord_id = [](const std::string& a_id) {
+            if (a_id.empty() || a_id.size() > 32) {
+                return false;
+            }
+            return std::all_of(a_id.begin(), a_id.end(),
+                               [](unsigned char a_c) { return std::isalnum(a_c) != 0; });
+        };
+        if (!valid_cl_ord_id(cl_ord_id)) {
+            res.set_content(envelope_error("51000", "Parameter clOrdId error"), "application/json");
+            return;
+        }
         if (cl_ord_id.empty() || inst_id.empty() || sz.empty()) {
             res.set_content(envelope_error("51000", "Parameter error: clOrdId/instId/sz required"),
                             "application/json");
@@ -413,47 +425,50 @@ void OkxMockServer::register_routes()
                         "application/json");
     });
 
-    server_.Get(
-        "/api/v5/trade/order-info", [this](const httplib::Request& req, httplib::Response& res) {
-            const std::string body;
-            {
-                const std::lock_guard lock(mutex_);
-                record(req, body);
-                if (raw_status_ != 0) {
-                    res.status = raw_status_;
-                    res.set_content(raw_body_, "application/json");
-                    raw_status_ = 0;
-                    return;
-                }
-            }
-
-            const auto error = check_auth(req, body);
-            if (error) {
-                res.set_content(*error, "application/json");
-                return;
-            }
-
-            const std::string inst_id = req.get_param_value("instId");
-            const std::string cl_ord_id = req.get_param_value("clOrdId");
-            if (inst_id.empty() || cl_ord_id.empty()) {
-                res.set_content(envelope_error("51000", "Parameter error: instId/clOrdId"),
-                                "application/json");
-                return;
-            }
-
+    server_.Get("/api/v5/trade/order", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string body;
+        {
             const std::lock_guard lock(mutex_);
-            const auto order = find_order(cl_ord_id);
-            if (!order.has_value() || order->inst_id != inst_id) {
-                res.set_content(envelope_ok() + "]}", "application/json");
+            record(req, body);
+            if (raw_status_ != 0) {
+                res.status = raw_status_;
+                res.set_content(raw_body_, "application/json");
+                raw_status_ = 0;
                 return;
             }
-            nlohmann::json item = {{"ordId", order->ord_id},   {"clOrdId", order->cl_ord_id},
-                                   {"instId", order->inst_id}, {"state", order->state},
-                                   {"side", order->side},      {"ordType", order->ord_type},
-                                   {"px", order->px},          {"sz", order->sz},
-                                   {"avgPx", order->avg_px},   {"accFillSz", order->acc_fill_sz}};
-            res.set_content(envelope_ok() + item.dump() + "]}", "application/json");
-        });
+        }
+
+        const auto error = check_auth(req, body);
+        if (error) {
+            res.set_content(*error, "application/json");
+            return;
+        }
+
+        const std::string inst_id = req.get_param_value("instId");
+        const std::string cl_ord_id = req.get_param_value("clOrdId");
+        if (inst_id.empty() || cl_ord_id.empty()) {
+            res.set_content(envelope_error("51000", "Parameter error: instId/clOrdId"),
+                            "application/json");
+            return;
+        }
+
+        const std::lock_guard lock(mutex_);
+        const auto order = find_order(cl_ord_id);
+        if (!order.has_value()) {
+            res.set_content(envelope_error("51603", "Order does not exist"), "application/json");
+            return;
+        }
+        if (order->inst_id != inst_id) {
+            res.set_content(envelope_ok() + "]}", "application/json");
+            return;
+        }
+        nlohmann::json item = {{"ordId", order->ord_id},   {"clOrdId", order->cl_ord_id},
+                               {"instId", order->inst_id}, {"state", order->state},
+                               {"side", order->side},      {"ordType", order->ord_type},
+                               {"px", order->px},          {"sz", order->sz},
+                               {"avgPx", order->avg_px},   {"accFillSz", order->acc_fill_sz}};
+        res.set_content(envelope_ok() + item.dump() + "]}", "application/json");
+    });
 }
 
 } // namespace gateway::testing

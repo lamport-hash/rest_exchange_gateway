@@ -9,6 +9,8 @@
 namespace gateway::rest {
 
 namespace {
+constexpr std::size_t kMaxClientOrderIdLength = 32;
+
 auto json_response(int a_status, const nlohmann::json& a_body) -> crow::response
 {
     crow::response res{a_status, a_body.dump()};
@@ -48,6 +50,21 @@ auto is_decimal(std::string_view a_text) -> bool
     return a_text.back() != '.';
 }
 
+auto is_valid_client_order_id(std::string_view a_id) -> bool
+{
+    if (a_id.empty() || a_id.size() > kMaxClientOrderIdLength) {
+        return false;
+    }
+    for (const char c : a_id) {
+        const bool alnum =
+            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (!alnum) {
+            return false;
+        }
+    }
+    return true;
+}
+
 auto parse_side(std::string_view a_text) -> std::optional<Side>
 {
     if (a_text == "buy") {
@@ -72,7 +89,7 @@ auto parse_order_type(std::string_view a_text) -> std::optional<OrderType>
 
 auto map_connector_error(const Error& a_error, std::string_view a_client_order_id) -> crow::response
 {
-    if (a_error.code == "venue:51016") {
+    if (a_error.code == "venue:51016" || a_error.code == "venue:51603") {
         return error_response(404, "not_found", "order does not exist on the venue",
                               a_client_order_id);
     }
@@ -124,6 +141,11 @@ void register_order_routes(crow::SimpleApp& a_app, ExchangeConnector& a_connecto
 
                 if (request.client_order_id.empty()) {
                     return error_response(400, "invalid_request", "clientOrderId is required", "");
+                }
+                if (!is_valid_client_order_id(request.client_order_id)) {
+                    return error_response(400, "invalid_request",
+                                          "clientOrderId must be 1-32 alphanumeric characters",
+                                          request.client_order_id);
                 }
                 if (request.instrument_id.empty()) {
                     return error_response(400, "invalid_request", "instrumentId is required",

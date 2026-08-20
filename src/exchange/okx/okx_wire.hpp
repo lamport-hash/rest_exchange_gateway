@@ -71,7 +71,7 @@ struct OkxOrderInfo
 [[nodiscard]] auto to_json(const OkxAmendRequest& a_request) -> Result<nlohmann::json>;
 
 /// URL-encoded query string (without leading '?') for GET
-/// /api/v5/trade/order-info.
+/// /api/v5/trade/order.
 [[nodiscard]] auto to_query(const OkxQuery& a_query) -> std::string;
 
 /// Parse one element of the envelope "data" array of trade endpoints.

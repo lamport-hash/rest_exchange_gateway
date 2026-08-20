@@ -12,15 +12,15 @@ using gateway::exchange::okx::sign_request;
 TEST_CASE("sign_request matches openssl-generated HMAC vectors (normal cases)")
 {
     CHECK(sign_request("2026-08-20T10:00:00.000Z", "GET",
-                       "/api/v5/trade/order-info?instId=BTC-USDT&clOrdId=gw-0001", "",
+                       "/api/v5/trade/order?instId=BTC-USDT&clOrdId=gw0001", "",
                        "22582BD0CFF14C41EDBF1AB98506286D") ==
-          "3JH7D3udTOG6VXY8yB53VbXkVqvCW+5SctAun/6m/ao=");
+          "wgWpMOc0b32OTt4ttNe9DD32Dk+Z/eor9JN7ArnIPGU=");
 
     CHECK(
         sign_request(
             "2026-08-20T10:05:30.250Z", "POST", "/api/v5/trade/order",
-            R"({"instId":"BTC-USDT","tdMode":"cash","side":"buy","ordType":"limit","px":"50000","sz":"0.001","clOrdId":"gw-0001"})",
-            "my-api-secret") == "ZKRjGk6rfqb7XMKajKoFIwEEBigChrJm30+xDuONRxM=");
+            R"({"instId":"BTC-USDT","tdMode":"cash","side":"buy","ordType":"limit","px":"50000","sz":"0.001","clOrdId":"gw0001"})",
+            "my-api-secret") == "UgxlWhTv+SexlUq7iBAo9/zsjMRXsibfdUp9zRWTFXU=");
 }
 
 TEST_CASE("sign_request handles edge-case inputs")
