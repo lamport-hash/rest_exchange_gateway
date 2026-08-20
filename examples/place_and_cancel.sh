@@ -46,7 +46,7 @@ show() { # label raw_response (body\nstatus)
 }
 
 echo "== placing limit order: buy ${QUANTITY} ${INSTRUMENT} @ ${PRICE} (clientOrderId: ${CLIENT_ORDER_ID})"
-PLACE=$(http POST /orders "{\"clientOrderId\":\"${CLIENT_ORDER_ID}\",\"instrumentId\":\"${INSTRUMENT}\",\"side\":\"buy\",\"type\":\"limit\",\"price\":\"${PRICE}\",\"quantity\":\"${QUANTITY}\"}")
+PLACE=$(http POST /orders "{\"clientOrderId\":\"${CLIENT_ORDER_ID}\",\"venue\":\"OKX\",\"symbol\":\"${INSTRUMENT}\",\"side\":\"buy\",\"type\":\"limit\",\"price\":\"${PRICE}\",\"quantity\":\"${QUANTITY}\"}")
 PLACE_STATUS="${PLACE##*$'\n'}"
 show "${PLACE}" "place"
 if [ "${PLACE_STATUS}" != "201" ]; then
@@ -54,6 +54,6 @@ if [ "${PLACE_STATUS}" != "201" ]; then
     exit 1
 fi
 
-show "$(http GET "/orders/${CLIENT_ORDER_ID}?instrumentId=${INSTRUMENT}")" "status before cancel"
-show "$(http DELETE "/orders/${CLIENT_ORDER_ID}?instrumentId=${INSTRUMENT}")" "cancel"
-show "$(http GET "/orders/${CLIENT_ORDER_ID}?instrumentId=${INSTRUMENT}")" "status after cancel"
+show "$(http GET "/orders/${CLIENT_ORDER_ID}")" "status before cancel"
+show "$(http DELETE "/orders/${CLIENT_ORDER_ID}")" "cancel"
+show "$(http GET "/orders/${CLIENT_ORDER_ID}")" "status after cancel"

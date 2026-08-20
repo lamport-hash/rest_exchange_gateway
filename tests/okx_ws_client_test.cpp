@@ -121,9 +121,10 @@ auto feed_config(const OkxMockWsServer& a_server, OkxConfig a_base) -> OkxConfig
 auto order_item(const std::string& a_state, const std::string& a_fill = "0",
                 const std::string& a_px = "") -> nlohmann::json
 {
-    return nlohmann::json{{"instId", "BTC-USDT"}, {"ordId", "ord-1"}, {"clOrdId", "gw1"},
-                          {"state", a_state},     {"px", "50000"},    {"sz", "1"},
-                          {"accFillSz", a_fill},  {"avgPx", a_px}};
+    return nlohmann::json{
+        {"instId", "BTC-USDT"}, {"ordId", "ord-1"}, {"clOrdId", "gw1"}, {"state", a_state},
+        {"side", "buy"},        {"px", "50000"},    {"sz", "1"},        {"accFillSz", a_fill},
+        {"avgPx", a_px}};
 }
 
 TEST_CASE("feed logs in, subscribes and normalizes orders updates")
@@ -157,6 +158,7 @@ TEST_CASE("feed logs in, subscribes and normalizes orders updates")
         CHECK(report.client_order_id == "gw1");
         CHECK(report.exchange_order_id == "ord-1");
         CHECK(report.state == gateway::OrderState::Live);
+        CHECK(report.side == gateway::Side::Buy);
         CHECK(report.filled_quantity == "0");
     }
 
@@ -384,6 +386,14 @@ TEST_CASE("unnormalizable updates raise a ProtocolWarning instead of killing the
     {
         auto item = order_item("live");
         item.erase("clOrdId");
+        server.push_orders_update(item);
+        REQUIRE(events.wait_for_count(FeedEventType::ProtocolWarning, 1, 5000));
+    }
+
+    SUBCASE("unknown side")
+    {
+        auto item = order_item("live");
+        item["side"] = "short";
         server.push_orders_update(item);
         REQUIRE(events.wait_for_count(FeedEventType::ProtocolWarning, 1, 5000));
     }

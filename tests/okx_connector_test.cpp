@@ -47,7 +47,8 @@ auto limit_buy() -> OrderRequest
                         .side = Side::Buy,
                         .type = OrderType::Limit,
                         .price = "50000",
-                        .quantity = "0.001"};
+                        .quantity = "0.001",
+                        .time_in_force = ""};
 }
 
 auto make_connector(const OkxMockServer& a_server) -> OkxConnector
@@ -105,8 +106,40 @@ TEST_CASE("partial fill surfaces as PartiallyFilled snapshot")
     REQUIRE(snapshot.is_ok());
     REQUIRE(snapshot.value().has_value());
     CHECK(snapshot.value()->state == OrderState::PartiallyFilled);
+    CHECK(snapshot.value()->instrument_id == "BTC-USDT");
+    CHECK(snapshot.value()->side == Side::Buy);
+    CHECK(snapshot.value()->type == OrderType::Limit);
     CHECK(snapshot.value()->filled_quantity == "0.0004");
     CHECK(snapshot.value()->average_fill_price == "49999.5");
+}
+
+TEST_CASE("get_open_orders returns normalized pending snapshots")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    OkxConnector connector = make_connector(server);
+    ExchangeConnector& connector_interface = connector;
+
+    REQUIRE(connector_interface.place_order(limit_buy()).is_ok());
+    server.apply_fill("gw0001", "0.0004", "49999.5");
+
+    const auto open = connector_interface.get_open_orders();
+    REQUIRE(open.is_ok());
+    REQUIRE(open.value().size() == 1);
+    const auto& snapshot = open.value().front();
+    CHECK(snapshot.client_order_id == "gw0001");
+    CHECK(snapshot.exchange_order_id == "mock-1");
+    CHECK(snapshot.instrument_id == "BTC-USDT");
+    CHECK(snapshot.state == OrderState::PartiallyFilled);
+    CHECK(snapshot.side == Side::Buy);
+    CHECK(snapshot.type == OrderType::Limit);
+    CHECK(snapshot.filled_quantity == "0.0004");
+
+    // a fully filled order disappears from the pending listing
+    server.apply_fill("gw0001", "0.0006", "50000");
+    const auto after_fill = connector_interface.get_open_orders();
+    REQUIRE(after_fill.is_ok());
+    CHECK(after_fill.value().empty());
 }
 
 TEST_CASE("cancel transitions the snapshot to Canceled")
@@ -504,6 +537,7 @@ TEST_CASE("start/stop control the orders feed end-to-end")
                                                 {"ordId", "ord-1"},
                                                 {"clOrdId", "gw0001"},
                                                 {"state", "partially_filled"},
+                                                {"side", "buy"},
                                                 {"px", "50000"},
                                                 {"sz", "1"},
                                                 {"accFillSz", "0.4"},
@@ -518,6 +552,66 @@ TEST_CASE("start/stop control the orders feed end-to-end")
 
     connector.stop();
     connector.stop(); // idempotent
+}
+
+TEST_CASE("connectivity handler reflects the feed lifecycle")
+{
+    OkxMockServer rest_server(base_config());
+    rest_server.start();
+    OkxMockWsServer ws_server(base_config());
+    ws_server.start();
+
+    auto config = base_config();
+    config.port = static_cast<int>(rest_server.port());
+    config.ws.enabled = true;
+    config.ws.host = "127.0.0.1";
+    config.ws.port = static_cast<int>(ws_server.port());
+    config.ws.use_tls = false;
+    config.ws.path = "/ws/v5/private";
+    config.ws.ping_interval = std::chrono::milliseconds{60};
+    OkxConnector connector{config, [] { return std::string("2026-08-20T10:00:00.000Z"); }};
+
+    // latch recording the sequence of connectivity transitions
+    struct Latch
+    {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::vector<bool> events;
+
+        void record(bool a_up)
+        {
+            {
+                const std::lock_guard lock(mutex);
+                events.push_back(a_up);
+            }
+            cv.notify_all();
+        }
+
+        [[nodiscard]] auto wait_for_count(std::size_t a_count, int a_timeout_ms) -> bool
+        {
+            std::unique_lock lock(mutex);
+            return cv.wait_for(lock, std::chrono::milliseconds{a_timeout_ms},
+                               [&] { return events.size() >= a_count; });
+        }
+    } latch;
+
+    connector.set_connectivity_handler([&latch](bool a_up) { latch.record(a_up); });
+    connector.start();
+    REQUIRE(ws_server.wait_for_subscriber(5000));
+    REQUIRE(latch.wait_for_count(1, 5000));
+    {
+        const std::lock_guard lock(latch.mutex);
+        CHECK(latch.events.front() == true); // connected
+    }
+
+    ws_server.kill_connections();
+    REQUIRE(latch.wait_for_count(2, 5000));
+    {
+        const std::lock_guard lock(latch.mutex);
+        CHECK(latch.events[1] == false); // dropped
+    }
+
+    connector.stop();
 }
 
 TEST_CASE("start is a no-op when the ws feed is disabled")

@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gateway {
 
@@ -35,7 +36,8 @@ enum class OrderState
 };
 
 /// Client-facing order request. price/quantity are decimal strings carried
-/// verbatim to the venue (no float conversion).
+/// verbatim to the venue (no float conversion). time_in_force is the
+/// normalized "GTC"/"IOC"/"FOK" (empty = venue default).
 struct OrderRequest
 {
     std::string client_order_id;
@@ -44,6 +46,7 @@ struct OrderRequest
     OrderType type = OrderType::Limit;
     std::string price;
     std::string quantity;
+    std::string time_in_force;
 };
 
 struct CancelRequest
@@ -78,7 +81,12 @@ struct OrderSnapshot
 {
     std::string client_order_id;
     std::string exchange_order_id;
+    /// Venue instrument id (same spelling the client used, e.g. BTC-USDT);
+    /// needed to adopt venue-live orders during reconciliation.
+    std::string instrument_id;
     OrderState state = OrderState::Live;
+    Side side = Side::Buy;
+    OrderType type = OrderType::Limit;
     std::string price;
     std::string quantity;
     std::string filled_quantity;
@@ -92,6 +100,7 @@ struct ExecutionReport
     std::string client_order_id;
     std::string exchange_order_id;
     OrderState state = OrderState::Live;
+    Side side = Side::Buy;
     std::string filled_quantity;
     std::string average_fill_price;
 };
@@ -131,11 +140,24 @@ class ExchangeConnector
     [[nodiscard]] virtual auto
     get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> = 0;
 
+    /// All currently open (working) orders on the venue, e.g. OKX
+    /// GET /api/v5/trade/orders-pending. Used by startup/reconnect
+    /// reconciliation to adopt venue-live orders missing from the local
+    /// registry. Best effort: implementations may return a single page
+    /// and skip items they cannot normalize.
+    [[nodiscard]] virtual auto get_open_orders() -> Result<std::vector<OrderSnapshot>> = 0;
+
     /// Register the execution-report sink (WebSocket-driven updates). Must
     /// be installed before start(); reports are delivered on connector-owned
     /// threads.
     virtual void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) = 0;
+
+    /// Register the execution-feed connectivity sink: invoked with true
+    /// when the feed (re)establishes, false when it drops. Lets the core
+    /// re-reconcile state that may have been missed during an outage.
+    /// Must be installed before start().
+    virtual void set_connectivity_handler(std::function<void(bool)> a_handler) = 0;
 
     /// Begin background work (execution feeds). Handlers must be installed
     /// beforehand. Idempotent.

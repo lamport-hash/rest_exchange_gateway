@@ -1,10 +1,12 @@
 #pragma once
 
+#include "core/risk.hpp"
 #include "gateway/result.hpp"
 
 #include <cstdint>
 #include <filesystem>
 #include <nlohmann/json.hpp>
+#include <optional>
 
 namespace gateway {
 
@@ -14,6 +16,11 @@ namespace gateway {
 struct GatewayConfig
 {
     std::uint16_t rest_port = 8080;
+    /// Append-only order event log; std::nullopt disables persistence
+    /// (recovery then relies entirely on venue reconciliation).
+    std::optional<std::filesystem::path> persistence_log;
+    /// Pre-trade risk limits; empty = unlimited (warned at startup).
+    RiskConfig risk;
     nlohmann::json okx = nlohmann::json::object();
 };
 

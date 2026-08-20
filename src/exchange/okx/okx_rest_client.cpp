@@ -14,6 +14,7 @@ constexpr const char* kPathPlace = "/api/v5/trade/order";
 constexpr const char* kPathCancel = "/api/v5/trade/cancel-order";
 constexpr const char* kPathAmend = "/api/v5/trade/amend-order";
 constexpr const char* kPathOrderInfo = "/api/v5/trade/order";
+constexpr const char* kPathOrdersPending = "/api/v5/trade/orders-pending";
 
 auto string_field(const nlohmann::json& a_node, const char* a_name) -> std::optional<std::string>
 {
@@ -293,6 +294,27 @@ auto OkxRestClient::get_order(const OkxQuery& a_query) const -> Result<std::opti
         return Error{"protocol", "order-info data[0] is not an object"};
     }
     return std::optional<OkxOrderInfo>{parse_order_info(data.front())};
+}
+
+auto OkxRestClient::get_orders_pending() const -> Result<std::vector<OkxOrderInfo>>
+{
+    const auto envelope = signed_request("GET", kPathOrdersPending, "");
+    if (!envelope.is_ok()) {
+        return envelope.error();
+    }
+    const auto& data = envelope.value().at("data");
+    if (!data.is_array()) {
+        return Error{"protocol", "orders-pending data is not an array"};
+    }
+    std::vector<OkxOrderInfo> pending;
+    pending.reserve(data.size());
+    for (const auto& item : data) {
+        if (!item.is_object()) {
+            return Error{"protocol", "orders-pending data item is not an object"};
+        }
+        pending.push_back(parse_order_info(item));
+    }
+    return pending;
 }
 
 } // namespace gateway::exchange::okx

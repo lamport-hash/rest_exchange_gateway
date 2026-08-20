@@ -149,10 +149,17 @@ void OkxOrdersFeed::dispatch_orders_message(const nlohmann::json& a_message)
             emit(FeedEventType::ProtocolWarning, "orders item without clOrdId; skipped");
             continue;
         }
+        const auto side = map_okx_side(info.side);
+        if (!side.has_value()) {
+            emit(FeedEventType::ProtocolWarning,
+                 "unknown OKX order side \"" + info.side + "\"; item skipped");
+            continue;
+        }
         if (report_handler_) {
             report_handler_(ExecutionReport{.client_order_id = info.cl_ord_id,
                                             .exchange_order_id = info.ord_id,
                                             .state = *state,
+                                            .side = *side,
                                             .filled_quantity = info.acc_fill_sz,
                                             .average_fill_price = info.avg_px});
         }

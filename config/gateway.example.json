@@ -2,6 +2,23 @@
     "rest": {
         "port": 8080
     },
+    "persistence": {
+        "logPath": "data/orders.jsonl"
+    },
+    "risk": {
+        "default": {
+            "maxQty": "10",
+            "maxNotional": "1000000",
+            "maxPosition": "10"
+        },
+        "instruments": {
+            "BTC-USDT": {
+                "maxQty": "5",
+                "maxNotional": "500000",
+                "maxPosition": "2"
+            }
+        }
+    },
     "okx": {
         "apiKey": "YOUR_OKX_DEMO_API_KEY",
         "secretKey": "YOUR_OKX_DEMO_SECRET_KEY",

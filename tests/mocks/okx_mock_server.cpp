@@ -353,6 +353,7 @@ void OkxMockServer::register_routes(httplib::Server& a_server)
         const std::string ord_type = str("ordType");
         const std::string px = str("px");
         const std::string sz = str("sz");
+        const std::string td_if = str("tdIf");
 
         const auto valid_cl_ord_id = [](const std::string& a_id) {
             if (a_id.empty() || a_id.size() > 32) {
@@ -377,6 +378,15 @@ void OkxMockServer::register_routes(httplib::Server& a_server)
         if (ord_type != "limit" && ord_type != "market") {
             res.set_content(envelope_error("51010", "Unsupported order type"), "application/json");
             return;
+        }
+        // tdIf is only applicable to limit orders and only accepts the
+        // documented values (live OKX rejects anything else with 51000).
+        if (!td_if.empty()) {
+            if (ord_type != "limit" || (td_if != "GTC" && td_if != "IOC" && td_if != "FOK")) {
+                res.set_content(envelope_error("51000", "Parameter tdIf error"),
+                                "application/json");
+                return;
+            }
         }
         if (inst_id != "BTC-USDT") {
             res.set_content(envelope_error("51001", "Instrument ID does not exist"),
@@ -546,6 +556,41 @@ void OkxMockServer::register_routes(httplib::Server& a_server)
                                {"avgPx", order->avg_px},   {"accFillSz", order->acc_fill_sz}};
         res.set_content(envelope_ok() + item.dump() + "]}", "application/json");
     });
+
+    // GET /api/v5/trade/orders-pending: every open (live or partially
+    // filled) order, newest first — same item shape as order-info.
+    a_server.Get("/api/v5/trade/orders-pending",
+                 [this](const httplib::Request& req, httplib::Response& res) {
+                     if (begin_request(req, "", res)) {
+                         return;
+                     }
+
+                     const auto error = check_auth(req, "");
+                     if (error) {
+                         res.set_content(*error, "application/json");
+                         return;
+                     }
+
+                     const std::lock_guard lock(mutex_);
+                     nlohmann::json data = nlohmann::json::array();
+                     for (const auto& entry : orders_) {
+                         const MockOrder& order = entry.second;
+                         if (order.state == "live" || order.state == "partially_filled") {
+                             data.push_back(nlohmann::json{{"ordId", order.ord_id},
+                                                           {"clOrdId", order.cl_ord_id},
+                                                           {"instId", order.inst_id},
+                                                           {"state", order.state},
+                                                           {"side", order.side},
+                                                           {"ordType", order.ord_type},
+                                                           {"px", order.px},
+                                                           {"sz", order.sz},
+                                                           {"avgPx", order.avg_px},
+                                                           {"accFillSz", order.acc_fill_sz}});
+                         }
+                     }
+                     const nlohmann::json body = {{"code", "0"}, {"msg", ""}, {"data", data}};
+                     res.set_content(body.dump(), "application/json");
+                 });
 }
 
 } // namespace gateway::testing

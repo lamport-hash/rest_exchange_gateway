@@ -17,7 +17,8 @@ TEST_CASE("to_json builds the place-order body with all fields")
                                   .side = "buy",
                                   .ord_type = "limit",
                                   .px = "50000",
-                                  .sz = "0.001"};
+                                  .sz = "0.001",
+                                  .td_if = ""};
     const auto json = to_json(request);
     CHECK(json.at("clOrdId") == "gw-0001");
     CHECK(json.at("instId") == "BTC-USDT");
@@ -35,11 +36,29 @@ TEST_CASE("to_json omits px for market orders")
                                  .side = "buy",
                                  .ord_type = "market",
                                  .px = "",
-                                 .sz = "0.001"};
+                                 .sz = "0.001",
+                                 .td_if = ""};
     const auto json = to_json(market);
     CHECK_FALSE(json.contains("px"));
     CHECK(json.at("sz") == "0.001");
     CHECK(json.at("ordType") == "market");
+}
+
+TEST_CASE("to_json carries tdIf only when set")
+{
+    OkxPlaceRequest request{.cl_ord_id = "gw-ioc",
+                            .inst_id = "BTC-USDT",
+                            .side = "buy",
+                            .ord_type = "limit",
+                            .px = "50000",
+                            .sz = "0.001",
+                            .td_if = "IOC"};
+    auto json = to_json(request);
+    CHECK(json.at("tdIf") == "IOC");
+
+    request.td_if.clear();
+    json = to_json(request);
+    CHECK_FALSE(json.contains("tdIf"));
 }
 
 TEST_CASE("to_json builds the cancel-order body")
@@ -137,6 +156,15 @@ TEST_CASE("parse_order_info tolerates null and non-string fields")
     CHECK(info.state.empty());
     CHECK(info.sz == "5");
     CHECK(info.avg_px == "1.5");
+}
+
+TEST_CASE("map_okx_side maps documented values and rejects unknowns")
+{
+    CHECK(map_okx_side("buy") == gateway::Side::Buy);
+    CHECK(map_okx_side("sell") == gateway::Side::Sell);
+    CHECK_FALSE(map_okx_side("BUY").has_value());
+    CHECK_FALSE(map_okx_side("short").has_value());
+    CHECK_FALSE(map_okx_side("").has_value());
 }
 
 TEST_CASE("url_encode keeps unreserved characters and encodes everything else")

@@ -37,15 +37,18 @@ class OkxConnector final : public ExchangeConnector
     amend_order(const AmendRequest& a_request) -> Result<OrderPlacement> override;
     [[nodiscard]] auto
     get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> override;
+    [[nodiscard]] auto get_open_orders() -> Result<std::vector<OrderSnapshot>> override;
 
     void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override;
+    void set_connectivity_handler(std::function<void(bool)> a_handler) override;
 
     void start() override;
     void stop() override;
 
   private:
     void forward_report(const ExecutionReport& a_report);
+    void forward_connectivity(bool a_connected);
 
     OkxConfig config_;
     OkxRestClient::TimestampProvider timestamp_provider_;
@@ -53,6 +56,7 @@ class OkxConnector final : public ExchangeConnector
     RetryClock retry_clock_;
     std::mutex handler_mutex_;
     std::function<void(const ExecutionReport&)> execution_report_handler_;
+    std::function<void(bool)> connectivity_handler_;
     std::unique_ptr<OkxOrdersFeed> feed_;
 };
 

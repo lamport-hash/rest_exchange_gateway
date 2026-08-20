@@ -46,7 +46,8 @@ auto limit_buy() -> OkxPlaceRequest
                            .side = "buy",
                            .ord_type = "limit",
                            .px = "50000",
-                           .sz = "0.001"};
+                           .sz = "0.001",
+                           .td_if = ""};
 }
 
 TEST_CASE("place and fetch a live order (normal path)")
@@ -153,6 +154,42 @@ TEST_CASE("cancel a live order then observe canceled state")
     REQUIRE(info.is_ok());
     REQUIRE(info.value().has_value());
     CHECK(info.value()->state == "canceled");
+}
+
+TEST_CASE("orders-pending lists only open orders")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    auto second = limit_buy();
+    second.cl_ord_id = "gw0002";
+    REQUIRE(client.place_order(limit_buy()).is_ok());
+    REQUIRE(client.place_order(second).is_ok());
+
+    auto pending = client.get_orders_pending();
+    REQUIRE(pending.is_ok());
+    REQUIRE(pending.value().size() == 2);
+
+    // one order fully fills, one is canceled -> pending becomes empty
+    server.apply_fill("gw0001", "0.001", "50000");
+    REQUIRE(client.cancel_order(OkxCxlRequest{"BTC-USDT", "gw0002"}).is_ok());
+    pending = client.get_orders_pending();
+    REQUIRE(pending.is_ok());
+    CHECK(pending.value().empty());
+
+    // pending items carry the same fields as order-info
+    auto third = limit_buy();
+    third.cl_ord_id = "gw0003";
+    REQUIRE(client.place_order(third).is_ok());
+    server.apply_fill("gw0003", "0.0004", "49999.5");
+    pending = client.get_orders_pending();
+    REQUIRE(pending.is_ok());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().cl_ord_id == "gw0003");
+    CHECK(pending.value().front().inst_id == "BTC-USDT");
+    CHECK(pending.value().front().state == "partially_filled");
+    CHECK(pending.value().front().acc_fill_sz == "0.0004");
 }
 
 TEST_CASE("venue error codes surface as Result errors")
