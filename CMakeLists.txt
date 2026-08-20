@@ -51,6 +51,20 @@ endif()
 add_executable(smoke apps/smoke.cpp)
 target_link_libraries(smoke PRIVATE gateway_warnings gateway_third_party)
 
+add_library(gateway_core STATIC
+    src/core/clock.cpp
+    src/core/config.cpp
+)
+target_include_directories(gateway_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gateway_core PUBLIC gateway_warnings gateway_third_party)
+
+add_library(gateway_okx STATIC
+    src/exchange/okx/okx_signer.cpp
+    src/exchange/okx/okx_wire.cpp
+    src/exchange/okx/okx_rest_client.cpp
+)
+target_link_libraries(gateway_okx PUBLIC gateway_core)
+
 if(GATEWAY_BUILD_TESTS)
     enable_testing()
 
@@ -58,4 +72,24 @@ if(GATEWAY_BUILD_TESTS)
     target_include_directories(smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(smoke_test PRIVATE gateway_warnings gateway_third_party)
     add_test(NAME smoke_test COMMAND smoke_test)
+
+    add_executable(result_test tests/result_test.cpp)
+    target_link_libraries(result_test PRIVATE gateway_core)
+    add_test(NAME result_test COMMAND result_test)
+
+    add_executable(clock_test tests/clock_test.cpp)
+    target_link_libraries(clock_test PRIVATE gateway_core)
+    add_test(NAME clock_test COMMAND clock_test)
+
+    add_executable(config_test tests/config_test.cpp)
+    target_link_libraries(config_test PRIVATE gateway_okx)
+    add_test(NAME config_test COMMAND config_test)
+
+    add_executable(okx_signer_test tests/okx_signer_test.cpp)
+    target_link_libraries(okx_signer_test PRIVATE gateway_okx)
+    add_test(NAME okx_signer_test COMMAND okx_signer_test)
+
+    add_executable(okx_wire_test tests/okx_wire_test.cpp)
+    target_link_libraries(okx_wire_test PRIVATE gateway_okx)
+    add_test(NAME okx_wire_test COMMAND okx_wire_test)
 endif()
