@@ -71,3 +71,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# live credentials (never commit)
+config/gateway.json
+config/*.local.json
+
