@@ -1,3 +1,7 @@
+# api keys
+*.secret
+*.s
+
 # Prerequisites
 *.d
 
