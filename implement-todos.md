@@ -40,16 +40,39 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       1-32 alphanumeric; mock aligned with live behavior incl. 51603)
 
 ## Phase 2 — Resilience for the OKX connector
-- [ ] 2.1 Exponential backoff + jitter retry policy for REST (configurable
+- [x] 2.1 Exponential backoff + jitter retry policy for REST (configurable
       caps, per-request budget)
-- [ ] 2.2 OKX WebSocket orders channel: subscribe, normalize updates,
+      (src/core/retry.{hpp,cpp}: RetryPolicy + injectable RetryClock;
+      "okx":{"retry":{...}} config; attempts, wall-clock budget, jitter
+      bounds; shared by REST verbs, unknown-outcome resolution and WS
+      reconnect backoff)
+- [x] 2.2 OKX WebSocket orders channel: subscribe, normalize updates,
       disconnect detection, reconnect with backoff, resubscribe, ping/pong
-- [ ] 2.3 Unknown-outcome handling: place timeout → get-order resolution;
+      (src/exchange/okx/okx_ws_client.{hpp,cpp}: login via WS signature,
+      "orders" channel, app-level text ping/pong, inbound-traffic watchdog,
+      unbounded reconnect with backoff+jitter, re-login+resubscribe;
+      ExchangeConnector gained start()/stop(); execution reports normalized
+      and forwarded to the handler; gateway_main logs them as JSON lines)
+- [x] 2.3 Unknown-outcome handling: place timeout → get-order resolution;
       idempotent clientOrderId retries (same request twice → same outcome)
-- [ ] 2.4 Fault-injection tests on mock OKX: dropped, delayed, duplicate and
+      (src/exchange/okx/okx_resilient.hpp: resolve-then-retry engine —
+      transport failure → lookup: found → synthesized ack, absent → safe
+      re-send, unresolved → transport error without re-send (no
+      double-place); venue 51000 duplicate-clOrdId → existing order's ack;
+      cancel of canceled order → idempotent success; cancel of filled →
+      rejection; amend matched against snapshot; GET retries transport
+      directly)
+- [x] 2.4 Fault-injection tests on mock OKX: dropped, delayed, duplicate and
       out-of-order messages; WS killed mid-stream
+      (OkxMockServer: drop_next_request / drop_next_response (processed but
+      ack lost) / delay_next_request; OkxMockWsServer: login/subscribe acks,
+      scripted pushes, duplicate pushes, dropped updates, kill_connections,
+      abrupt endpoint death + restart_on_same_port, ping silence; 3 new test
+      binaries: retry_test, okx_resilient_test, okx_ws_client_test +
+      connector/rest fault suites — 12 tests total)
       Acceptance: connectivity failures → gateway recovers, no lost or
       double-applied orders; both presets green
+      (2026-08-20: pass — ctest debug (ASan+UBSan) and release 12/12)
 
 ## Phase 3 — Order state machine, OMS, recovery, full REST surface
 - [ ] 3.1 Normalized OrderState machine (Live, PartiallyFilled, Filled,

@@ -18,6 +18,23 @@ auto field_string(const nlohmann::json& a_item, const char* a_name) -> std::stri
 }
 } // namespace
 
+auto map_okx_state(std::string_view a_state) -> std::optional<OrderState>
+{
+    if (a_state == "live") {
+        return OrderState::Live;
+    }
+    if (a_state == "partially_filled") {
+        return OrderState::PartiallyFilled;
+    }
+    if (a_state == "filled") {
+        return OrderState::Filled;
+    }
+    if (a_state == "canceled") {
+        return OrderState::Canceled;
+    }
+    return std::nullopt;
+}
+
 auto to_json(const OkxPlaceRequest& a_request) -> nlohmann::json
 {
     nlohmann::json body = {{"clOrdId", a_request.cl_ord_id},

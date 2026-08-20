@@ -11,4 +11,10 @@ namespace gateway::exchange::okx {
                                 std::string_view a_path, std::string_view a_body,
                                 std::string_view a_secret) -> std::string;
 
+/// Signature for the private WebSocket login message: HMAC-SHA256 over
+/// timestamp + "GET" + "/users/self/verify", keyed with a_secret (OKX v5
+/// WebSocket docs). Same encoding as sign_request.
+[[nodiscard]] auto sign_ws_login(std::string_view a_timestamp,
+                                 std::string_view a_secret) -> std::string;
+
 } // namespace gateway::exchange::okx

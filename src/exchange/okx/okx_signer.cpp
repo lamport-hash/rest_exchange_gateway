@@ -44,4 +44,9 @@ auto sign_request(std::string_view a_timestamp, std::string_view a_method, std::
     return base64_encode(mac.data(), mac_len);
 }
 
+auto sign_ws_login(std::string_view a_timestamp, std::string_view a_secret) -> std::string
+{
+    return sign_request(a_timestamp, "GET", "/users/self/verify", "", a_secret);
+}
+
 } // namespace gateway::exchange::okx

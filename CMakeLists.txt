@@ -57,6 +57,7 @@ target_link_libraries(gateway PRIVATE gateway_rest gateway_okx)
 add_library(gateway_core STATIC
     src/core/clock.cpp
     src/core/config.cpp
+    src/core/retry.cpp
 )
 target_include_directories(gateway_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -69,6 +70,7 @@ add_library(gateway_okx STATIC
     src/exchange/okx/okx_wire.cpp
     src/exchange/okx/okx_rest_client.cpp
     src/exchange/okx/okx_connector.cpp
+    src/exchange/okx/okx_ws_client.cpp
 )
 target_link_libraries(gateway_okx PUBLIC gateway_core)
 
@@ -82,6 +84,7 @@ if(GATEWAY_BUILD_TESTS)
 
     add_library(gateway_test_support STATIC
         tests/mocks/okx_mock_server.cpp
+        tests/mocks/okx_mock_ws_server.cpp
     )
     target_include_directories(gateway_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(gateway_test_support PUBLIC gateway_okx)
@@ -94,6 +97,10 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(result_test tests/result_test.cpp)
     target_link_libraries(result_test PRIVATE gateway_core)
     add_test(NAME result_test COMMAND result_test)
+
+    add_executable(retry_test tests/retry_test.cpp)
+    target_link_libraries(retry_test PRIVATE gateway_core)
+    add_test(NAME retry_test COMMAND retry_test)
 
     add_executable(clock_test tests/clock_test.cpp)
     target_link_libraries(clock_test PRIVATE gateway_core)
@@ -111,6 +118,10 @@ if(GATEWAY_BUILD_TESTS)
     target_link_libraries(okx_wire_test PRIVATE gateway_okx)
     add_test(NAME okx_wire_test COMMAND okx_wire_test)
 
+    add_executable(okx_resilient_test tests/okx_resilient_test.cpp)
+    target_link_libraries(okx_resilient_test PRIVATE gateway_okx)
+    add_test(NAME okx_resilient_test COMMAND okx_resilient_test)
+
     add_executable(okx_rest_client_test tests/okx_rest_client_test.cpp)
     target_link_libraries(okx_rest_client_test PRIVATE gateway_test_support)
     add_test(NAME okx_rest_client_test COMMAND okx_rest_client_test)
@@ -118,6 +129,10 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(okx_connector_test tests/okx_connector_test.cpp)
     target_link_libraries(okx_connector_test PRIVATE gateway_test_support)
     add_test(NAME okx_connector_test COMMAND okx_connector_test)
+
+    add_executable(okx_ws_client_test tests/okx_ws_client_test.cpp)
+    target_link_libraries(okx_ws_client_test PRIVATE gateway_test_support)
+    add_test(NAME okx_ws_client_test COMMAND okx_ws_client_test)
 
     add_executable(rest_api_test tests/rest_api_test.cpp)
     target_link_libraries(rest_api_test PRIVATE gateway_test_support gateway_rest)

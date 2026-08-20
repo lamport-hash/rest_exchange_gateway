@@ -21,7 +21,9 @@ auto base_config() -> OkxConfig
                      .host = "127.0.0.1",
                      .port = 0,
                      .use_tls = false,
-                     .demo_trading = true};
+                     .demo_trading = true,
+                     .retry = gateway::RetryPolicy{},
+                     .ws = gateway::exchange::okx::OkxWsConfig{}};
 }
 
 auto config_for(const OkxMockServer& a_server, bool a_demo = true) -> OkxConfig

@@ -131,9 +131,19 @@ class ExchangeConnector
     [[nodiscard]] virtual auto
     get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> = 0;
 
-    /// Register the execution-report sink (WebSocket-driven updates).
+    /// Register the execution-report sink (WebSocket-driven updates). Must
+    /// be installed before start(); reports are delivered on connector-owned
+    /// threads.
     virtual void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) = 0;
+
+    /// Begin background work (execution feeds). Handlers must be installed
+    /// beforehand. Idempotent.
+    virtual void start() = 0;
+
+    /// Stop background work, close feeds and join connector-owned threads.
+    /// Idempotent; synchronous requests may still be used afterwards.
+    virtual void stop() = 0;
 };
 
 /// Lower-case name of a state for logging/responses, e.g. "partially_filled".

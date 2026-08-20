@@ -61,6 +61,17 @@ class OkxMockServer
     /// One-shot fault injection: the next request gets a raw response instead
     /// of the normal envelope.
     void set_next_raw_response(int a_status, std::string a_body);
+    /// One-shot fault injection: the next request is dropped mid-response
+    /// (partial chunked body, then the connection is closed) — the client
+    /// observes a transport failure.
+    void drop_next_request();
+    /// One-shot fault injection: the next request is PROCESSED normally, but
+    /// its success response is dropped mid-body (the outcome did happen, the
+    /// acknowledgement is lost).
+    void drop_next_response();
+    /// One-shot fault injection: the next request's response is delayed by
+    /// a_ms milliseconds (still delivered normally afterwards).
+    void delay_next_request(unsigned a_ms);
 
     /// Recorded requests, in arrival order.
     [[nodiscard]] auto recorded_requests() const -> std::vector<RecordedRequest>;
@@ -84,6 +95,14 @@ class OkxMockServer
 
     void register_routes();
 
+    /// Record the request and apply one-shot fault scripting (raw response /
+    /// drop / delay). Returns true when the response has already been set
+    /// (fault applied) and the caller must not process the request further.
+    auto begin_request(const httplib::Request& a_req, std::string_view a_body,
+                       httplib::Response& a_res) -> bool;
+    /// Deliver a success response, honoring drop_next_response() (the
+    /// request was processed; its acknowledgement is then dropped).
+    void respond_success(httplib::Response& a_res, const std::string& a_body);
     [[nodiscard]] auto check_auth(const httplib::Request& a_req,
                                   std::string_view a_body) const -> std::optional<std::string>;
     [[nodiscard]] auto find_order(const std::string& a_cl_ord_id) const -> std::optional<MockOrder>;
@@ -94,6 +113,9 @@ class OkxMockServer
     FillMode fill_mode_ = FillMode::None;
     int raw_status_ = 0;
     std::string raw_body_;
+    int drop_next_ = 0;
+    bool drop_next_response_ = false;
+    unsigned delay_next_ms_ = 0;
     std::unordered_map<std::string, MockOrder> orders_;
     std::vector<RecordedRequest> recorded_;
     long long ord_counter_ = 0;

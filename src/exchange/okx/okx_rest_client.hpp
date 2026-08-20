@@ -1,14 +1,32 @@
 #pragma once
 
+#include "core/retry.hpp"
 #include "exchange/okx/okx_wire.hpp"
 #include "gateway/result.hpp"
 
+#include <chrono>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 
 namespace gateway::exchange::okx {
+
+/// Private WebSocket (orders channel) connection parameters.
+struct OkxWsConfig
+{
+    bool enabled = true;
+    std::string host = "ws.okx.com";
+    int port = 8443;
+    bool use_tls = true;
+    std::string path = "/ws/v5/private";
+    /// OKX disconnects idle connections after ~30s of silence; the feed sends
+    /// the application-level text "ping" every ping_interval.
+    std::chrono::milliseconds ping_interval{20000};
+    /// Close the connection after this many ping intervals without any
+    /// inbound message (pong or data); triggers reconnect.
+    int max_missed_pongs = 2;
+};
 
 struct OkxConfig
 {
@@ -19,10 +37,18 @@ struct OkxConfig
     int port = 443;
     bool use_tls = true;
     bool demo_trading = false;
+    int rest_connect_timeout_ms = 5000;
+    int rest_read_timeout_ms = 5000;
+    /// REST retry policy for transport failures, also used to resolve
+    /// unknown-outcome place/cancel/amend and to back off WebSocket
+    /// reconnects (attempts/budget are shared, backoff fields only).
+    RetryPolicy retry;
+    OkxWsConfig ws;
 };
 
 /// Parse an OkxConfig from the "okx" config section. Requires apiKey,
-/// secretKey and passphrase; host/port/useTls/demoTrading are optional.
+/// secretKey and passphrase; host/port/useTls/demoTrading/rest timeouts and
+/// the "retry"/"ws" sub-objects are optional.
 /// Errors: "protocol" with the list of missing/invalid fields.
 [[nodiscard]] auto okx_config_from_json(const nlohmann::json& a_section) -> Result<OkxConfig>;
 

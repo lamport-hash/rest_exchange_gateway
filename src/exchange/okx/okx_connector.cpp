@@ -1,5 +1,10 @@
 #include "exchange/okx/okx_connector.hpp"
 
+#include "core/clock.hpp"
+#include "core/retry.hpp"
+#include "exchange/okx/okx_resilient.hpp"
+#include "exchange/okx/okx_ws_client.hpp"
+
 #include <utility>
 
 namespace gateway::exchange::okx {
@@ -39,30 +44,21 @@ auto to_snapshot(const OkxOrderInfo& a_info) -> Result<OrderSnapshot>
 }
 } // namespace
 
-auto map_okx_state(std::string_view a_state) -> std::optional<OrderState>
-{
-    if (a_state == "live") {
-        return OrderState::Live;
-    }
-    if (a_state == "partially_filled") {
-        return OrderState::PartiallyFilled;
-    }
-    if (a_state == "filled") {
-        return OrderState::Filled;
-    }
-    if (a_state == "canceled") {
-        return OrderState::Canceled;
-    }
-    return std::nullopt;
-}
-
 OkxConnector::OkxConnector(OkxConfig a_config, OkxRestClient::TimestampProvider a_timestamp)
-    : client_(std::move(a_config), std::move(a_timestamp))
+    : config_(a_config),
+      timestamp_provider_(a_timestamp ? std::move(a_timestamp)
+                                      : OkxRestClient::TimestampProvider{&utc_now_iso_ms}),
+      client_(std::move(a_config), timestamp_provider_), retry_clock_(real_retry_clock())
 {}
+
+OkxConnector::~OkxConnector()
+{
+    stop();
+}
 
 auto OkxConnector::place_order(const OrderRequest& a_request) -> Result<OrderPlacement>
 {
-    const auto ack = client_.place_order(to_wire(a_request));
+    const auto ack = resilient_place(client_, to_wire(a_request), config_.retry, retry_clock_);
     if (!ack.is_ok()) {
         return ack.error();
     }
@@ -71,8 +67,10 @@ auto OkxConnector::place_order(const OrderRequest& a_request) -> Result<OrderPla
 
 auto OkxConnector::cancel_order(const CancelRequest& a_request) -> Result<OrderPlacement>
 {
-    const auto ack = client_.cancel_order(
-        OkxCxlRequest{.inst_id = a_request.instrument_id, .cl_ord_id = a_request.client_order_id});
+    const auto ack = resilient_cancel(
+        client_,
+        OkxCxlRequest{.inst_id = a_request.instrument_id, .cl_ord_id = a_request.client_order_id},
+        config_.retry, retry_clock_);
     if (!ack.is_ok()) {
         return ack.error();
     }
@@ -81,37 +79,78 @@ auto OkxConnector::cancel_order(const CancelRequest& a_request) -> Result<OrderP
 
 auto OkxConnector::amend_order(const AmendRequest& a_request) -> Result<OrderPlacement>
 {
-    const auto body = client_.amend_order(OkxAmendRequest{.inst_id = a_request.instrument_id,
-                                                          .cl_ord_id = a_request.client_order_id,
-                                                          .new_px = a_request.new_price,
-                                                          .new_sz = a_request.new_quantity});
-    if (!body.is_ok()) {
-        return body.error();
+    const auto ack = resilient_amend(client_,
+                                     OkxAmendRequest{.inst_id = a_request.instrument_id,
+                                                     .cl_ord_id = a_request.client_order_id,
+                                                     .new_px = a_request.new_price,
+                                                     .new_sz = a_request.new_quantity},
+                                     config_.retry, retry_clock_);
+    if (!ack.is_ok()) {
+        return ack.error();
     }
-    return ack_to_placement(body.value());
+    return ack_to_placement(ack.value());
 }
 
 auto OkxConnector::get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>>
 {
-    const auto info = client_.get_order(
-        OkxQuery{.inst_id = a_query.instrument_id, .cl_ord_id = a_query.client_order_id});
-    if (!info.is_ok()) {
-        return info.error();
-    }
-    if (!info.value().has_value()) {
-        return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
-    }
-    const auto snapshot = to_snapshot(*info.value());
-    if (!snapshot.is_ok()) {
-        return snapshot.error();
-    }
-    return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{snapshot.value()}};
+    const OkxQuery wire_query{.inst_id = a_query.instrument_id,
+                              .cl_ord_id = a_query.client_order_id};
+    const auto attempt = [this, &wire_query]() -> Result<std::optional<OrderSnapshot>> {
+        const auto info = client_.get_order(wire_query);
+        if (!info.is_ok()) {
+            return info.error();
+        }
+        if (!info.value().has_value()) {
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
+        }
+        const auto snapshot = to_snapshot(*info.value());
+        if (!snapshot.is_ok()) {
+            return snapshot.error();
+        }
+        return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{snapshot.value()}};
+    };
+    // A GET is side-effect free: transport failures are retried directly.
+    return with_retries<std::optional<OrderSnapshot>>(
+        config_.retry, retry_clock_, attempt,
+        [](const Error& a_error) { return a_error.code == "transport"; });
 }
 
 void OkxConnector::set_execution_report_handler(
     std::function<void(const ExecutionReport&)> a_handler)
 {
+    const std::lock_guard lock(handler_mutex_);
     execution_report_handler_ = std::move(a_handler);
+}
+
+void OkxConnector::forward_report(const ExecutionReport& a_report)
+{
+    std::function<void(const ExecutionReport&)> handler;
+    {
+        const std::lock_guard lock(handler_mutex_);
+        handler = execution_report_handler_;
+    }
+    if (handler) {
+        handler(a_report);
+    }
+}
+
+void OkxConnector::start()
+{
+    if (!config_.ws.enabled || feed_) {
+        return;
+    }
+    auto feed = std::make_unique<OkxOrdersFeed>(config_, timestamp_provider_);
+    feed->set_report_handler([this](const ExecutionReport& a_report) { forward_report(a_report); });
+    feed->start();
+    feed_ = std::move(feed);
+}
+
+void OkxConnector::stop()
+{
+    if (feed_) {
+        feed_->stop();
+        feed_.reset();
+    }
 }
 
 } // namespace gateway::exchange::okx

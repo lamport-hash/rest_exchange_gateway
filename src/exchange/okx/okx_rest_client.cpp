@@ -30,12 +30,63 @@ auto perform_request(const OkxConfig& a_config, std::string_view a_method,
                      const std::string& a_body) -> httplib::Result
 {
     ClientT client(a_config.host, a_config.port);
-    client.set_connection_timeout(5);
-    client.set_read_timeout(5);
+    client.set_connection_timeout(0, a_config.rest_connect_timeout_ms * 1000);
+    client.set_read_timeout(0, a_config.rest_read_timeout_ms * 1000);
     if (a_method == "GET") {
         return client.Get(a_path, a_headers);
     }
     return client.Post(a_path, a_headers, a_body, "application/json");
+}
+
+auto ws_config_from_json(const nlohmann::json& a_node,
+                         OkxWsConfig a_defaults) -> Result<OkxWsConfig>
+{
+    if (!a_node.is_object()) {
+        return Error{"protocol", "okx ws config must be a JSON object"};
+    }
+
+    OkxWsConfig config = a_defaults;
+    if (const auto enabled = a_node.find("enabled"); enabled != a_node.end()) {
+        if (!enabled->is_boolean()) {
+            return Error{"protocol", "okx ws enabled must be a boolean"};
+        }
+        config.enabled = enabled->get<bool>();
+    }
+    if (const auto host = string_field(a_node, "host")) {
+        config.host = *host;
+    }
+    if (const auto port = a_node.find("port"); port != a_node.end()) {
+        if (!port->is_number_unsigned() || port->get<std::uint64_t>() < 1 ||
+            port->get<std::uint64_t>() > 65535) {
+            return Error{"protocol", "okx ws port must be an unsigned number in [1, 65535]"};
+        }
+        config.port = static_cast<int>(port->get<std::uint64_t>());
+    }
+    if (const auto use_tls = a_node.find("useTls"); use_tls != a_node.end()) {
+        if (!use_tls->is_boolean()) {
+            return Error{"protocol", "okx ws useTls must be a boolean"};
+        }
+        config.use_tls = use_tls->get<bool>();
+    }
+    if (const auto path = string_field(a_node, "path")) {
+        config.path = *path;
+    }
+    if (const auto interval = a_node.find("pingIntervalMs"); interval != a_node.end()) {
+        if (!interval->is_number_unsigned() || interval->get<std::uint64_t>() < 1 ||
+            interval->get<std::uint64_t>() > 600000) {
+            return Error{"protocol", "okx ws pingIntervalMs must be in [1, 600000]"};
+        }
+        config.ping_interval =
+            std::chrono::milliseconds{static_cast<long long>(interval->get<std::uint64_t>())};
+    }
+    if (const auto missed = a_node.find("maxMissedPongs"); missed != a_node.end()) {
+        if (!missed->is_number_unsigned() || missed->get<std::uint64_t>() < 1 ||
+            missed->get<std::uint64_t>() > 100) {
+            return Error{"protocol", "okx ws maxMissedPongs must be in [1, 100]"};
+        }
+        config.max_missed_pongs = static_cast<int>(missed->get<std::uint64_t>());
+    }
+    return config;
 }
 } // namespace
 
@@ -91,6 +142,38 @@ auto okx_config_from_json(const nlohmann::json& a_section) -> Result<OkxConfig>
             return Error{"protocol", "okx demoTrading must be a boolean"};
         }
         config.demo_trading = demo->get<bool>();
+    }
+
+    const auto timeouts = a_section.find("restConnectTimeoutMs");
+    if (timeouts != a_section.end()) {
+        if (!timeouts->is_number_unsigned() || timeouts->get<std::uint64_t>() < 1 ||
+            timeouts->get<std::uint64_t>() > 600000) {
+            return Error{"protocol", "okx restConnectTimeoutMs must be in [1, 600000]"};
+        }
+        config.rest_connect_timeout_ms = static_cast<int>(timeouts->get<std::uint64_t>());
+    }
+    const auto read_timeout = a_section.find("restReadTimeoutMs");
+    if (read_timeout != a_section.end()) {
+        if (!read_timeout->is_number_unsigned() || read_timeout->get<std::uint64_t>() < 1 ||
+            read_timeout->get<std::uint64_t>() > 600000) {
+            return Error{"protocol", "okx restReadTimeoutMs must be in [1, 600000]"};
+        }
+        config.rest_read_timeout_ms = static_cast<int>(read_timeout->get<std::uint64_t>());
+    }
+
+    if (const auto retry = a_section.find("retry"); retry != a_section.end()) {
+        const auto policy = retry_policy_from_json(*retry, config.retry);
+        if (!policy.is_ok()) {
+            return policy.error();
+        }
+        config.retry = policy.value();
+    }
+    if (const auto ws = a_section.find("ws"); ws != a_section.end()) {
+        const auto parsed = ws_config_from_json(*ws, config.ws);
+        if (!parsed.is_ok()) {
+            return parsed.error();
+        }
+        config.ws = parsed.value();
     }
     return config;
 }

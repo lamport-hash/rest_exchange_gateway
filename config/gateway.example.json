@@ -9,6 +9,25 @@
         "host": "www.okx.com",
         "port": 443,
         "useTls": true,
-        "demoTrading": true
+        "demoTrading": true,
+        "restConnectTimeoutMs": 5000,
+        "restReadTimeoutMs": 5000,
+        "retry": {
+            "maxAttempts": 3,
+            "initialBackoffMs": 100,
+            "maxBackoffMs": 2000,
+            "multiplier": 2.0,
+            "jitter": 0.5,
+            "budgetMs": 5000
+        },
+        "ws": {
+            "enabled": true,
+            "host": "ws.okx.com",
+            "port": 8443,
+            "useTls": true,
+            "path": "/ws/v5/private",
+            "pingIntervalMs": 20000,
+            "maxMissedPongs": 2
+        }
     }
 }
