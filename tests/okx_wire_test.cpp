@@ -28,6 +28,20 @@ TEST_CASE("to_json builds the place-order body with all fields")
     CHECK(json.at("sz") == "0.001");
 }
 
+TEST_CASE("to_json omits px for market orders")
+{
+    const OkxPlaceRequest market{.cl_ord_id = "gw-m",
+                                 .inst_id = "BTC-USDT",
+                                 .side = "buy",
+                                 .ord_type = "market",
+                                 .px = "",
+                                 .sz = "0.001"};
+    const auto json = to_json(market);
+    CHECK_FALSE(json.contains("px"));
+    CHECK(json.at("sz") == "0.001");
+    CHECK(json.at("ordType") == "market");
+}
+
 TEST_CASE("to_json builds the cancel-order body")
 {
     const OkxCxlRequest request{.inst_id = "BTC-USDT", .cl_ord_id = "gw-0001"};
