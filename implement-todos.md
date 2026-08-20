@@ -13,19 +13,22 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
 - [ ] Consult user before architectural or core-object changes
 
 ## Phase 1 — Raw OKX REST client → ExchangeConnector → thin gateway slice
-- [ ] 1.1 Scaffolding: CMake + Ninja, debug/release presets (C++20,
+- [x] 1.1 Scaffolding: CMake + Ninja, debug/release presets (C++20,
       -Wall -Wextra -Wpedantic -Werror), third_party/ (crow_all.h, httplib.h,
       json.hpp, doctest.h), .clang-format; Crow /health smoke test
-- [ ] 1.2 Raw OKX REST client (no abstraction yet): HMAC-SHA256 signing,
+      (Docker dev environment added: Dockerfile + docker-compose.yml, all
+      build/test runs inside the container)
+- [x] 1.2 Raw OKX REST client (no abstraction yet): HMAC-SHA256 signing,
       OK-ACCESS-* headers, x-simulated-trading demo header; place / cancel /
       get-order against /api/v5/trade/*
-- [ ] 1.3 Mock OKX (in-process, from official v5 docs): trade/order,
+- [x] 1.3 Mock OKX (in-process, from official v5 docs): trade/order,
       trade/cancel-order, trade/order-info; error envelope (code/sMsg);
       basic partial-fill engine; deterministic unit tests for the client
-- [ ] 1.4 ExchangeConnector thin interface extracted from the working client:
+      (amend-order route included)
+- [x] 1.4 ExchangeConnector thin interface extracted from the working client:
       place/cancel/amend/get + execution-report callback; OKXConnector
       implements it; exchange code confined below the interface
-- [ ] 1.5 Thin Crow slice wired end-to-end: POST /orders, GET /orders/{id},
+- [x] 1.5 Thin Crow slice wired end-to-end: POST /orders, GET /orders/{id},
       DELETE /orders/{id} → OKXConnector; structured JSON errors
 - [ ] 1.6 Live validation on OKX demo trading (credentials in config)
       Acceptance: place/cancel/status through the gateway over HTTP on OKX

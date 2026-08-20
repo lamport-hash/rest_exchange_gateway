@@ -1,0 +1,14 @@
+{
+    "rest": {
+        "port": 8080
+    },
+    "okx": {
+        "apiKey": "YOUR_OKX_DEMO_API_KEY",
+        "secretKey": "YOUR_OKX_DEMO_SECRET_KEY",
+        "passphrase": "YOUR_OKX_DEMO_PASSPHRASE",
+        "host": "www.okx.com",
+        "port": 443,
+        "useTls": true,
+        "demoTrading": true
+    }
+}

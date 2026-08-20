@@ -52,6 +52,22 @@ Format code:
 docker compose exec dev clang-format -i src/**/*.{hpp,cpp} tests/**/*.hpp tests/**/*.cpp apps/*.cpp
 ```
 
+Run the gateway (needs `config/gateway.json` — copy `config/gateway.example.json`
+and fill in venue credentials; the file is gitignored):
+
+```bash
+docker compose exec dev ./build/release/gateway config/gateway.json
+```
+
+REST surface (phase 1, OKX backend):
+
+- `POST /orders` — `{"clientOrderId","instrumentId","side":"buy|sell","type":"limit|market","price","quantity"}` → 201
+- `GET /orders/{clientOrderId}?instrumentId=BTC-USDT` → order snapshot
+- `DELETE /orders/{clientOrderId}?instrumentId=BTC-USDT` → cancel
+- `GET /health`
+- Errors: `{"error":{"code","reason","clientOrderId"}}` (400 invalid request,
+  404 not found, 409 venue rejected, 502 venue unreachable, 500 internal)
+
 Stop everything (named volumes `build/` and `ccache/` are kept):
 
 ```bash
