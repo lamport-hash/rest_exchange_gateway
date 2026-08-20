@@ -84,6 +84,8 @@ class OkxMockWsServer
     /// Block until at least one session subscribed (or timeout). False on
     /// timeout.
     [[nodiscard]] auto wait_for_subscriber(int a_timeout_ms) const -> bool;
+    /// Timestamp string of the last login attempt (empty before any).
+    [[nodiscard]] auto last_login_timestamp() const -> std::string;
     /// Block until stats().received grows to a_size items.
     [[nodiscard]] auto wait_for_received(std::size_t a_size, int a_timeout_ms) const -> bool;
     /// Block until a_text was received from any session.
@@ -121,6 +123,7 @@ class OkxMockWsServer
     bool ignore_pings_ = false;
     int drop_next_ = 0;
     bool duplicate_next_ = false;
+    std::string last_login_timestamp_;
 };
 
 } // namespace gateway::testing

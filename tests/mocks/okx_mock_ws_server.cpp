@@ -32,6 +32,17 @@ auto subscribe_reply(const nlohmann::json& a_arg) -> std::string
     const nlohmann::json body = {{"event", "subscribe"}, {"arg", a_arg}};
     return body.dump();
 }
+
+/// Live OKX reply for an orders subscription without instType.
+auto subscribe_error_reply() -> std::string
+{
+    const nlohmann::json body = {{"event", "error"},
+                                 {"code", "60018"},
+                                 {"msg", "Subscribe failed, wrong URL or channel:orders doesn't "
+                                         "exist. Please use the correct URL, channel and "
+                                         "parameters referring to API document."}};
+    return body.dump();
+}
 } // namespace
 
 OkxMockWsServer::OkxMockWsServer(exchange::okx::OkxConfig a_client_config, std::string a_path)
@@ -178,6 +189,12 @@ auto OkxMockWsServer::wait_for_subscriber(int a_timeout_ms) const -> bool
                         [this] { return stats_.any_subscribed; });
 }
 
+auto OkxMockWsServer::last_login_timestamp() const -> std::string
+{
+    const std::lock_guard lock(mutex_);
+    return last_login_timestamp_;
+}
+
 auto OkxMockWsServer::wait_for_received(std::size_t a_size, int a_timeout_ms) const -> bool
 {
     std::unique_lock lock(mutex_);
@@ -248,6 +265,7 @@ void OkxMockWsServer::handle_text(httplib::ws::WebSocket& a_ws, Session& a_sessi
             ok = !login_should_fail_ && api_key == client_config_.api_key &&
                  passphrase == client_config_.passphrase && !timestamp.empty() && sign == expected;
             detail = ok ? std::string{} : "Invalid sign/credentials (mock)";
+            last_login_timestamp_ = timestamp;
         }
         const std::lock_guard lock(mutex_);
         if (ok) {
@@ -269,7 +287,11 @@ void OkxMockWsServer::handle_text(httplib::ws::WebSocket& a_ws, Session& a_sessi
             return;
         }
         const auto& arg = args->front();
-        const bool is_orders = string_field(arg, "channel") == "orders";
+        // Live OKX (verified on the demo environment) rejects an orders
+        // subscription without instType with error 60018; instId is not
+        // a valid subscribe parameter for this channel either.
+        const bool is_orders =
+            string_field(arg, "channel") == "orders" && !string_field(arg, "instType").empty();
         const std::lock_guard lock(mutex_);
         if (op == "subscribe" && is_orders) {
             a_session.subscribed = true;
@@ -283,6 +305,10 @@ void OkxMockWsServer::handle_text(httplib::ws::WebSocket& a_ws, Session& a_sessi
         }
         stats_.subscribed_sessions = subscribed_count;
         cv_.notify_all();
+        if (string_field(arg, "channel") == "orders" && !is_orders) {
+            a_ws.send(subscribe_error_reply());
+            return;
+        }
         a_ws.send(subscribe_reply(arg));
         return;
     }

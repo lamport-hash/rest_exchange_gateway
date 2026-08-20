@@ -13,6 +13,12 @@
 
 namespace gateway::exchange::okx {
 
+/// Effective private-WS host for a_config: demo credentials only
+/// authenticate on the demo host (wspap.okx.com); when demo trading is
+/// enabled and the configured host is the production default, the demo
+/// host is used instead. Explicit non-default hosts pass through.
+[[nodiscard]] auto ws_host_for(const OkxConfig& a_config) -> std::string;
+
 enum class FeedEventType
 {
     Connecting,

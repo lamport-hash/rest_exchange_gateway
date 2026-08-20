@@ -63,6 +63,14 @@ void run_pinger(httplib::ws::WebSocketClient& a_client, const OkxWsConfig& a_con
 
 } // namespace
 
+auto ws_host_for(const OkxConfig& a_config) -> std::string
+{
+    if (a_config.demo_trading && a_config.ws.host == "ws.okx.com") {
+        return "wspap.okx.com";
+    }
+    return a_config.ws.host;
+}
+
 OkxOrdersFeed::OkxOrdersFeed(OkxConfig a_config, OkxRestClient::TimestampProvider a_timestamp)
     : config_(std::move(a_config)),
       timestamp_(a_timestamp ? std::move(a_timestamp)
@@ -168,7 +176,10 @@ void OkxOrdersFeed::dispatch_orders_message(const nlohmann::json& a_message)
 
 auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
 {
-    const std::string url = (config_.ws.use_tls ? "wss://" : "ws://") + config_.ws.host + ":" +
+    // Demo-trading credentials only authenticate against the demo WS host;
+    // the production host rejects them with 50101.
+    const std::string host = ws_host_for(config_);
+    const std::string url = (config_.ws.use_tls ? "wss://" : "ws://") + host + ":" +
                             std::to_string(config_.ws.port) + config_.ws.path;
     emit(FeedEventType::Connecting, url);
 
@@ -194,8 +205,9 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
                    std::to_string(static_cast<int>(connected.error()));
         }
 
-        // login
-        const std::string timestamp = timestamp_();
+        // login (epoch seconds.millis timestamp — the WS login rejects
+        // ISO 8601 with error 60004)
+        const std::string timestamp = gateway::utc_now_epoch_ms();
         const nlohmann::json login = {
             {"op", "login"},
             {"args",
@@ -216,9 +228,12 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
             return "login rejected: " + reply;
         }
 
-        // subscribe to the orders channel (all instruments)
+        // subscribe to the orders channel. Live OKX rejects a bare
+        // {"channel":"orders"} with 60018: the private orders channel
+        // requires instType (the gateway trades SPOT / tdMode cash).
         const nlohmann::json subscribe = {
-            {"op", "subscribe"}, {"args", nlohmann::json::array({{{"channel", "orders"}}})}};
+            {"op", "subscribe"},
+            {"args", nlohmann::json::array({{{"channel", "orders"}, {"instType", "SPOT"}}})}};
         if (!client.send(subscribe.dump())) {
             return "failed to send subscribe request";
         }
