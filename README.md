@@ -66,6 +66,19 @@ Place then cancel a small demo limit order through the gateway:
 examples/place_and_cancel.sh                 # optional: port instrument price qty
 ```
 
+Black-box Phase 2 client suite — a one-shot Docker container acting as an
+external client: it starts a scriptable fake OKX venue (`mock_okx_env`:
+REST + private WS + HTTP fault-control plane) plus the real gateway binary,
+then drives every resilience point over HTTP with curl (retry on dropped /
+delayed responses, idempotent place/cancel retries, no double-applied
+orders, WS execution reports, disconnect/reconnect, venue death/recovery):
+
+```bash
+tests/blackbox/run_docker_client.sh          # 32 assertions, ~10 seconds
+# or directly inside the dev container:
+docker compose exec dev tests/blackbox/phase2_client_tests.sh
+```
+
 REST surface (phase 1, OKX backend):
 
 - `POST /orders` — `{"clientOrderId","instrumentId","side":"buy|sell","type":"limit|market","price","quantity"}` → 201

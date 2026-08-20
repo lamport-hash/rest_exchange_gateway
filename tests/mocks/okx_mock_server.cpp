@@ -110,9 +110,7 @@ auto ack_item(const std::string& a_ord_id, const std::string& a_cl_ord_id) -> st
 
 OkxMockServer::OkxMockServer(exchange::okx::OkxConfig a_client_config)
     : client_config_(std::move(a_client_config))
-{
-    register_routes();
-}
+{}
 
 OkxMockServer::~OkxMockServer()
 {
@@ -121,24 +119,41 @@ OkxMockServer::~OkxMockServer()
 
 void OkxMockServer::start()
 {
-    const int bound = server_.bind_to_any_port("127.0.0.1");
+    auto server = std::make_unique<httplib::Server>();
+    register_routes(*server);
+    const int bound = server->bind_to_any_port("127.0.0.1");
     if (bound < 0) {
         throw std::runtime_error("OkxMockServer: failed to bind");
     }
-    port_ = static_cast<std::uint16_t>(bound);
+    port_ = bound;
+    server_ = std::move(server);
     running_ = true;
-    server_thread_ = std::thread([this] { server_.listen_after_bind(); });
+    server_thread_ = std::thread([this] { server_->listen_after_bind(); });
 }
 
 void OkxMockServer::stop()
 {
     if (running_) {
-        server_.stop();
+        server_->stop();
         if (server_thread_.joinable()) {
             server_thread_.join();
         }
+        server_.reset();
         running_ = false;
     }
+}
+
+void OkxMockServer::restart_on_same_port()
+{
+    stop();
+    auto server = std::make_unique<httplib::Server>();
+    register_routes(*server);
+    if (!server->bind_to_port("127.0.0.1", port_)) {
+        throw std::runtime_error("OkxMockServer: failed to rebind port " + std::to_string(port_));
+    }
+    server_ = std::move(server);
+    running_ = true;
+    server_thread_ = std::thread([this] { server_->listen_after_bind(); });
 }
 
 auto OkxMockServer::port() const -> std::uint16_t
@@ -307,10 +322,10 @@ auto OkxMockServer::next_ord_id() -> std::string
     return "mock-" + std::to_string(++ord_counter_);
 }
 
-void OkxMockServer::register_routes()
+void OkxMockServer::register_routes(httplib::Server& a_server)
 {
-    server_.Post("/api/v5/trade/order", [this](const httplib::Request& req,
-                                               httplib::Response& res) {
+    a_server.Post("/api/v5/trade/order", [this](const httplib::Request& req,
+                                                httplib::Response& res) {
         const std::string body = req.body;
         if (begin_request(req, body, res)) {
             return;
@@ -406,7 +421,7 @@ void OkxMockServer::register_routes()
         respond_success(res, reply);
     });
 
-    server_.Post(
+    a_server.Post(
         "/api/v5/trade/cancel-order", [this](const httplib::Request& req, httplib::Response& res) {
             const std::string body = req.body;
             if (begin_request(req, body, res)) {
@@ -446,7 +461,7 @@ void OkxMockServer::register_routes()
             respond_success(res, reply);
         });
 
-    server_.Post(
+    a_server.Post(
         "/api/v5/trade/amend-order", [this](const httplib::Request& req, httplib::Response& res) {
             const std::string body = req.body;
             if (begin_request(req, body, res)) {
@@ -493,7 +508,8 @@ void OkxMockServer::register_routes()
             respond_success(res, reply);
         });
 
-    server_.Get("/api/v5/trade/order", [this](const httplib::Request& req, httplib::Response& res) {
+    a_server.Get("/api/v5/trade/order", [this](const httplib::Request& req,
+                                               httplib::Response& res) {
         const std::string body;
         if (begin_request(req, body, res)) {
             return;
