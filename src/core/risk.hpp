@@ -30,8 +30,8 @@ struct RiskConfig
 
     /// Limits for a_symbol: the explicit entry when present, otherwise
     /// the defaults; std::nullopt when the instrument is unlimited.
-    [[nodiscard]] auto limits_for(std::string_view a_symbol) const
-        -> std::optional<InstrumentRiskLimits>;
+    [[nodiscard]] auto
+    limits_for(std::string_view a_symbol) const -> std::optional<InstrumentRiskLimits>;
 };
 
 /// Parse the "risk" config section:
@@ -64,7 +64,7 @@ struct RiskOrder
 /// - "risk_max_position": |projected_position| above maxPosition
 /// - "risk_invalid_value": a value that should be a decimal is not
 [[nodiscard]] auto check_risk(const std::optional<InstrumentRiskLimits>& a_limits,
-                              std::string_view a_symbol, const RiskOrder& a_order)
-    -> std::optional<Error>;
+                              std::string_view a_symbol,
+                              const RiskOrder& a_order) -> std::optional<Error>;
 
 } // namespace gateway

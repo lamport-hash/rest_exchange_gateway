@@ -64,8 +64,8 @@ enum class TransitionResult
 };
 
 /// Attempt to move a_state to a_next following the explicit table.
-[[nodiscard]] inline auto apply_transition(OrderState& a_state, OrderState a_next)
-    -> TransitionResult
+[[nodiscard]] inline auto apply_transition(OrderState& a_state,
+                                           OrderState a_next) -> TransitionResult
 {
     if (!can_transition(a_state, a_next)) {
         return TransitionResult::Rejected;

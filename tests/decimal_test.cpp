@@ -53,7 +53,7 @@ TEST_CASE("parse_decimal rejects malformed input")
     rejects("abc");
     rejects("1 000");
     rejects("1,5");
-    rejects("1.000000001"); // 9 fractional digits
+    rejects("1.000000001");          // 9 fractional digits
     rejects("99999999999999999999"); // > 64 bits
 }
 
@@ -84,11 +84,9 @@ TEST_CASE("add and sub are exact across different scales")
 {
     CHECK(decimal_to_string(add(parse_ok("0.001"), parse_ok("0.002")).value()) == "0.003");
     CHECK(decimal_to_string(add(parse_ok("1.5"), parse_ok("2")).value()) == "3.5");
-    CHECK(decimal_to_string(sub(parse_ok("1"), parse_ok("0.00000001")).value()) ==
-          "0.99999999");
+    CHECK(decimal_to_string(sub(parse_ok("1"), parse_ok("0.00000001")).value()) == "0.99999999");
     CHECK(decimal_to_string(sub(parse_ok("0.5"), parse_ok("2")).value()) == "-1.5");
-    CHECK(decimal_to_string(add(negate(parse_ok("0.5")), parse_ok("0.25")).value()) ==
-          "-0.25");
+    CHECK(decimal_to_string(add(negate(parse_ok("0.5")), parse_ok("0.25")).value()) == "-0.25");
 }
 
 TEST_CASE("sub_clamped_zero never goes negative")
@@ -104,8 +102,7 @@ TEST_CASE("mul is exact and carries combined scale")
     REQUIRE(notional.is_ok());
     CHECK(decimal_to_string(notional.value()) == "50");
     CHECK(decimal_to_string(mul(parse_ok("0.1"), parse_ok("0.2")).value()) == "0.02");
-    CHECK(decimal_to_string(mul(parse_ok("49999.5"), parse_ok("0.0004")).value()) ==
-          "19.9998");
+    CHECK(decimal_to_string(mul(parse_ok("49999.5"), parse_ok("0.0004")).value()) == "19.9998");
     CHECK(decimal_to_string(mul(negate(parse_ok("3")), parse_ok("2")).value()) == "-6");
 }
 

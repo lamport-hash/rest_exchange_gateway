@@ -64,6 +64,20 @@ auto load_config(const std::filesystem::path& a_path) -> Result<GatewayConfig>
         config.okx = root.at("okx");
     }
 
+    if (root.contains("binance")) {
+        if (!root.at("binance").is_object()) {
+            return Error{"protocol", "binance section must be a JSON object"};
+        }
+        config.binance = root.at("binance");
+    }
+
+    if (root.contains("defaultVenue")) {
+        if (!root.at("defaultVenue").is_string()) {
+            return Error{"protocol", "defaultVenue must be a string"};
+        }
+        config.default_venue = root.at("defaultVenue").get<std::string>();
+    }
+
     return config;
 }
 

@@ -6,12 +6,14 @@
 #include "gateway/exchange_connector.hpp"
 
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace gateway {
 
@@ -20,6 +22,8 @@ struct OrderRecord
 {
     std::string client_order_id;
     std::string symbol;
+    /// Venue key ("okx", "binance") the order is routed to.
+    std::string venue;
     std::string exchange_order_id;
     Side side = Side::Buy;
     OrderType type = OrderType::Limit;
@@ -56,11 +60,11 @@ struct AmendCommand
 
 struct ReconcileReport
 {
-    int adopted = 0;             // venue-live orders adopted into the registry
-    int updated = 0;             // fresher fills/fields applied
-    int terminal_resolved = 0;   // registry orders found terminal on the venue
-    int absent_rejected = 0;     // venue conclusively does not know them -> Rejected
-    int unresolved = 0;          // venue unreachable; entries left untouched
+    int adopted = 0;           // venue-live orders adopted into the registry
+    int updated = 0;           // fresher fills/fields applied
+    int terminal_resolved = 0; // registry orders found terminal on the venue
+    int absent_rejected = 0;   // venue conclusively does not know them -> Rejected
+    int unresolved = 0;        // venue unreachable; entries left untouched
     bool pending_listing_failed = false;
 };
 
@@ -79,14 +83,18 @@ struct OmsStats
 ///
 /// Responsibilities:
 /// - clientOrderId registry (clientOrderId -> exchangeOrderId and full record)
+/// - venue routing: one connector per venue ("okx", "binance", ...); each
+///   record remembers its venue and every follow-up routes through it
 /// - strict idempotency: once a clientOrderId is known, places with it
 ///   replay the recorded outcome (identical ack or identical rejection)
 /// - execution-report arbitration through the order state machine:
 ///   duplicates, out-of-order and REST-vs-WS races never regress state
-///   (filled quantity is a monotonic high-water mark)
-/// - pre-trade risk checks before any venue routing
+///   (filled quantity is a monotonic high-water mark); reports from every
+///   venue feed the same registry keyed by the globally-unique clientOrderId
+/// - pre-trade risk checks before any venue routing (per instrument
+///   across venues: limits span both books conservatively)
 /// - append-only persistence of every applied event + startup replay
-/// - startup/reconnect reconciliation with the venue
+/// - startup/reconnect reconciliation with every venue
 ///
 /// Concurrency: all state is guarded by one mutex. Venue (connector) calls
 /// are made while holding it, so a slow venue call delays other OMS
@@ -96,16 +104,27 @@ struct OmsStats
 class OrderManagementSystem
 {
   public:
-    /// a_log may be nullptr (persistence disabled; recovery then relies
-    /// entirely on venue reconciliation).
-    OrderManagementSystem(ExchangeConnector& a_connector, EventLog* a_log, RiskConfig a_risk);
+    /// a_connectors: venue key -> connector (keys are lower-case venue
+    /// names, e.g. {"okx", &okx}, {"binance", &binance}); must not be
+    /// empty. a_default_venue is used when a place request carries no
+    /// venue. a_log may be nullptr (persistence disabled; recovery then
+    /// relies entirely on venue reconciliation).
+    OrderManagementSystem(std::map<std::string, ExchangeConnector*> a_connectors, EventLog* a_log,
+                          RiskConfig a_risk, std::string a_default_venue = "okx");
 
     OrderManagementSystem(const OrderManagementSystem&) = delete;
     auto operator=(const OrderManagementSystem&) -> OrderManagementSystem& = delete;
 
-    /// Place a new order. Paths:
+    /// Registered venue keys (for REST-layer validation).
+    [[nodiscard]] auto venues() const -> std::vector<std::string>;
+
+    /// Default venue key (used when a request omits the venue).
+    [[nodiscard]] auto default_venue() const -> std::string;
+
+    /// Place a new order on a_venue (empty -> default venue). Paths:
     /// - known clientOrderId: replayed outcome (record + replayed=true),
     ///   or the recorded rejection as an error
+    /// - unknown venue: "invalid_request"
     /// - risk rejection: recorded Rejected (code risk_*)
     /// - venue accepted: recorded Live
     /// - definitive venue rejection: recorded Rejected (code venue:*)
@@ -113,7 +132,8 @@ class OrderManagementSystem
     ///   already resolved as far as it could; the client may retry)
     /// - persistence failure after venue acceptance: recorded anyway and
     ///   reported as "persistence" (client retry replays the outcome)
-    [[nodiscard]] auto place(const OrderRequest& a_request) -> Result<PlaceOutcome>;
+    [[nodiscard]] auto place(const OrderRequest& a_request,
+                             std::string_view a_venue = {}) -> Result<PlaceOutcome>;
 
     /// Cancel; idempotent (already-canceled returns the record).
     /// Errors: "not_found", "order_terminal", venue/transport codes.
@@ -136,33 +156,41 @@ class OrderManagementSystem
     /// Errors: "io"/"persistence" (corrupt log — startup should fail).
     [[nodiscard]] auto load_from_log() -> Result<EventLog::ReplayStats>;
 
-    /// Reconcile the registry with the venue (startup and WS reconnect):
-    /// adopt venue-live orders missing locally, refresh fills, resolve
-    /// non-terminal entries (absent -> Rejected, unreachable -> keep).
+    /// Reconcile the registry with every venue (startup and WS
+    /// reconnect): adopt venue-live orders missing locally, refresh
+    /// fills, resolve non-terminal entries (absent -> Rejected,
+    /// unreachable -> keep).
     [[nodiscard]] auto reconcile() -> ReconcileReport;
 
   private:
+    /// Connector for a venue key; nullptr for unknown venues.
+    [[nodiscard]] auto connector_for(const std::string& a_venue) const -> ExchangeConnector*;
+
+    /// Connector that owns a record (venue field, default fallback).
+    [[nodiscard]] auto connector_for(const OrderRecord& a_record) const -> ExchangeConnector*;
+
     /// Apply one observation (WS report or REST snapshot). Returns true
     /// when something changed. Transitions go through the state machine
     /// (illegal/stale ones are discarded); filled_quantity only moves
     /// forward; snapshot price/quantity refresh the record when present.
-    auto apply_observation(OrderRecord& a_record, OrderState a_state,
-                           std::string_view a_filled, std::string_view a_avg_price,
-                           std::string_view a_price = "", std::string_view a_quantity = "")
-        -> bool;
+    auto apply_observation(OrderRecord& a_record, OrderState a_state, std::string_view a_filled,
+                           std::string_view a_avg_price, std::string_view a_price = "",
+                           std::string_view a_quantity = "") -> bool;
 
     /// Adopt/reject/... helpers shared by reconcile and replay.
-    void record_from_snapshot(const OrderSnapshot& a_snapshot, bool a_adopted);
-    auto lookup(std::string_view a_client_order_id) -> std::unordered_map<
-        std::string, OrderRecord>::iterator;
+    void record_from_snapshot(const OrderSnapshot& a_snapshot, const std::string& a_venue,
+                              bool a_adopted);
+    auto lookup(std::string_view a_client_order_id)
+        -> std::unordered_map<std::string, OrderRecord>::iterator;
 
     /// Worst-case signed position for a_symbol if every working order
     /// (plus the candidate amount) fully filled. a_replace non-null: the
     /// candidate replaces that record's contribution (amend); null: the
-    /// candidate is a fresh order (place).
+    /// candidate is a fresh order (place). Sums across venues: the same
+    /// instrument traded on two venues is one net position.
     auto projected_position(const std::string& a_symbol, const OrderRecord* a_replace,
-                            Side a_candidate_side, const std::string& a_candidate_qty)
-        -> std::string;
+                            Side a_candidate_side,
+                            const std::string& a_candidate_qty) -> std::string;
 
     /// Append an event; counts failures (venue truth already applied).
     void append_event(const nlohmann::json& a_event);
@@ -174,7 +202,8 @@ class OrderManagementSystem
 
     void apply_log_event(const nlohmann::json& a_event);
 
-    ExchangeConnector& connector_;
+    std::map<std::string, ExchangeConnector*> connectors_;
+    std::string default_venue_;
     EventLog* log_;
     RiskConfig risk_;
     mutable std::mutex mutex_;

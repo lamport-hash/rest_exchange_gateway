@@ -54,7 +54,80 @@ auto okx_ws_config(const OkxMockWsServer& a_ws) -> OkxWsConfig
                        .max_missed_pongs = 2};
 }
 
-/// Crow + OMS + OkxConnector against in-process mock venue (REST + WS).
+/// Scriptable in-memory stand-in for a second venue, registered as
+/// "binance" so REST-level venue routing can be tested without any
+/// exchange-specific code.
+class FakeVenueConnector final : public ExchangeConnector
+{
+  public:
+    std::function<Result<OrderPlacement>(const OrderRequest&)> place_impl =
+        [](const OrderRequest& a_request) {
+            return OrderPlacement{.client_order_id = a_request.client_order_id,
+                                  .exchange_order_id = "fake-" + a_request.client_order_id};
+        };
+    std::function<Result<OrderPlacement>(const CancelRequest&)> cancel_impl =
+        [](const CancelRequest& a_request) {
+            return OrderPlacement{.client_order_id = a_request.client_order_id,
+                                  .exchange_order_id = "fake-" + a_request.client_order_id};
+        };
+    std::function<Result<OrderPlacement>(const AmendRequest&)> amend_impl =
+        [](const AmendRequest& a_request) {
+            return OrderPlacement{.client_order_id = a_request.client_order_id,
+                                  .exchange_order_id = "fake-" + a_request.client_order_id};
+        };
+    std::function<Result<std::optional<OrderSnapshot>>(const OrderQuery&)> get_impl =
+        [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+        return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
+    };
+    std::function<Result<std::vector<OrderSnapshot>>()> open_impl =
+        []() -> Result<std::vector<OrderSnapshot>> { return std::vector<OrderSnapshot>{}; };
+    std::vector<OrderRequest> placed;
+    std::vector<AmendRequest> amends;
+    std::vector<CancelRequest> cancels;
+
+    [[nodiscard]] auto place_order(const OrderRequest& a_request) -> Result<OrderPlacement> override
+    {
+        placed.push_back(a_request);
+        return place_impl(a_request);
+    }
+    [[nodiscard]] auto
+    cancel_order(const CancelRequest& a_request) -> Result<OrderPlacement> override
+    {
+        cancels.push_back(a_request);
+        return cancel_impl(a_request);
+    }
+    [[nodiscard]] auto amend_order(const AmendRequest& a_request) -> Result<OrderPlacement> override
+    {
+        amends.push_back(a_request);
+        return amend_impl(a_request);
+    }
+    [[nodiscard]] auto
+    get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> override
+    {
+        return get_impl(a_query);
+    }
+    [[nodiscard]] auto get_open_orders() -> Result<std::vector<OrderSnapshot>> override
+    {
+        return open_impl();
+    }
+    void
+    set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override
+    {
+        report_handler = std::move(a_handler);
+    }
+    void set_connectivity_handler(std::function<void(bool)> a_handler) override
+    {
+        connectivity_handler = std::move(a_handler);
+    }
+    void start() override {}
+    void stop() override {}
+
+    std::function<void(const ExecutionReport&)> report_handler;
+    std::function<void(bool)> connectivity_handler;
+};
+
+/// Crow + OMS + OkxConnector (venue "okx") + FakeVenueConnector (venue
+/// "binance") against in-process mock OKX (REST + WS).
 class GatewayFixture
 {
   public:
@@ -89,7 +162,9 @@ class GatewayFixture
             config, [] { return std::string("2026-08-20T10:00:00.000Z"); });
 
         oms_ = std::make_unique<gateway::OrderManagementSystem>(
-            *connector_, event_log_ ? event_log_.get() : nullptr, a_options.risk);
+            std::map<std::string, gateway::ExchangeConnector*>{{"okx", connector_.get()},
+                                                               {"binance", &fake_binance_}},
+            event_log_ ? event_log_.get() : nullptr, a_options.risk);
         connector_->set_execution_report_handler(
             [this](const ExecutionReport& a_report) { oms_->on_execution_report(a_report); });
 
@@ -123,6 +198,7 @@ class GatewayFixture
     [[nodiscard]] auto client() -> httplib::Client& { return *client_; }
     [[nodiscard]] auto mock() -> OkxMockServer& { return *server_; }
     [[nodiscard]] auto ws() -> OkxMockWsServer& { return *ws_server_; }
+    [[nodiscard]] auto binance() -> FakeVenueConnector& { return fake_binance_; }
     [[nodiscard]] auto log_path() const -> const std::filesystem::path& { return log_path_; }
 
     /// Push an orders-channel update for a client order id and its state.
@@ -170,6 +246,7 @@ class GatewayFixture
   private:
     static inline int instance_counter_ = 0;
     std::filesystem::path log_path_{};
+    FakeVenueConnector fake_binance_;
     std::unique_ptr<OkxMockServer> server_;
     std::unique_ptr<OkxMockWsServer> ws_server_;
     std::unique_ptr<gateway::EventLog> event_log_;
@@ -386,14 +463,59 @@ TEST_CASE("validation errors use the structured error schema")
         CHECK(reason.find("tdMode") != std::string::npos);
     }
 
-    SUBCASE("unsupported venue")
+    SUBCASE("unknown venue is rejected with the supported list")
     {
+        const auto res = fixture.client().Post(
+            "/orders",
+            R"({"clientOrderId":"gw0001","venue":"bybit","symbol":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
+            "application/json");
+        REQUIRE(res->status == 400);
+        CHECK(error_body(res)["error"]["code"] == "invalid_request");
+        CHECK(error_body(res)["error"]["reason"].get<std::string>().find("BINANCE, OKX") !=
+              std::string::npos);
+    }
+
+    SUBCASE("venue binance routes to the binance connector")
+    {
+        const auto okx_requests_before = fixture.mock().recorded_requests().size();
         const auto res = fixture.client().Post(
             "/orders",
             R"({"clientOrderId":"gw0001","venue":"BINANCE","symbol":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
             "application/json");
-        REQUIRE(res->status == 400);
-        CHECK(error_body(res)["error"]["code"] == "invalid_request");
+        REQUIRE(res->status == 201);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["venue"] == "binance");
+        CHECK(body["exchangeOrderId"] == "fake-gw0001");
+        REQUIRE(fixture.binance().placed.size() == 1);
+        // OKX saw no new traffic (the fixture startup reconcile already ran)
+        CHECK(fixture.mock().recorded_requests().size() == okx_requests_before);
+    }
+
+    SUBCASE("cancel and amend route through the record's venue")
+    {
+        REQUIRE(
+            fixture.client()
+                .Post(
+                    "/orders",
+                    R"({"clientOrderId":"gw0001","venue":"binance","symbol":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
+                    "application/json")
+                ->status == 201);
+        REQUIRE(fixture.client().Delete("/orders/gw0001")->status == 200);
+        CHECK(fixture.binance().cancels.size() == 1);
+
+        REQUIRE(
+            fixture.client()
+                .Post(
+                    "/orders",
+                    R"({"clientOrderId":"gw0002","venue":"binance","symbol":"BTC-USDT","side":"buy","type":"limit","price":"1","quantity":"1"})",
+                    "application/json")
+                ->status == 201);
+        const auto amend = fixture.client().Put("/orders/gw0002", R"({"price":"2","quantity":"2"})",
+                                                "application/json");
+        REQUIRE(amend->status == 200);
+        REQUIRE(fixture.binance().amends.size() == 1);
+        CHECK(fixture.binance().amends.front().side == Side::Buy);
+        CHECK(fixture.binance().amends.front().time_in_force == "GTC");
     }
 
     SUBCASE("venue okx is accepted case-insensitively")
@@ -622,7 +744,7 @@ TEST_CASE("venue connectivity problems become 502 venue_unavailable")
     config.port = static_cast<int>(dead_port);
     config.ws.enabled = false;
     OkxConnector connector{config, [] { return std::string("2026-08-20T10:00:00.000Z"); }};
-    gateway::OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    gateway::OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     crow::SimpleApp app;
     gateway::rest::register_order_routes(app, oms);
@@ -772,7 +894,7 @@ TEST_CASE("restart drill: a new gateway instance recovers from the log + venue")
     config.ws = okx_ws_config(ws);
     OkxConnector connector{config, [] { return std::string("2026-08-20T10:00:00.000Z"); }};
     gateway::EventLog log{*log_path};
-    gateway::OrderManagementSystem oms{connector, &log, RiskConfig{}};
+    gateway::OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
     REQUIRE(oms.load_from_log().is_ok());
     connector.set_execution_report_handler(
         [&oms](const ExecutionReport& a_report) { oms.on_execution_report(a_report); });

@@ -32,8 +32,7 @@ auto read_file(const std::filesystem::path& a_path) -> std::string
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
-auto replayed_events(const std::filesystem::path& a_path)
-    -> Result<EventLog::ReplayStats>
+auto replayed_events(const std::filesystem::path& a_path) -> Result<EventLog::ReplayStats>
 {
     // the sink copies events; tests inspect them via a lambda capture
     // instead, this helper only checks success
@@ -48,16 +47,14 @@ TEST_CASE("append then replay round-trips events in order")
     std::filesystem::remove(path);
     {
         EventLog log{path};
-        REQUIRE(log.append({{"type", "place_accepted"}, {"clientOrderId", "a"}}) ==
-                 std::nullopt);
+        REQUIRE(log.append({{"type", "place_accepted"}, {"clientOrderId", "a"}}) == std::nullopt);
         REQUIRE(log.append({{"type", "state"}, {"clientOrderId", "a"}, {"state", "filled"}}) ==
-                 std::nullopt);
+                std::nullopt);
     }
 
     std::vector<nlohmann::json> events;
-    const auto stats = EventLog::replay(path, [&events](const nlohmann::json& a_event) {
-        events.push_back(a_event);
-    });
+    const auto stats = EventLog::replay(
+        path, [&events](const nlohmann::json& a_event) { events.push_back(a_event); });
     REQUIRE(stats.is_ok());
     CHECK(stats.value().events == 2);
     CHECK_FALSE(stats.value().tail_truncated);
@@ -98,9 +95,10 @@ TEST_CASE("replay of a missing file is an empty log")
 TEST_CASE("a torn final line is dropped and the file is truncated")
 {
     const auto path = temp_log_path("torn_tail");
-    const std::string good =
-        R"({"type":"place_accepted","clientOrderId":"a"})" "\n"
-        R"({"type":"state","clientOrderId":"a","state":"filled"})" "\n";
+    const std::string good = R"({"type":"place_accepted","clientOrderId":"a"})"
+                             "\n"
+                             R"({"type":"state","clientOrderId":"a","state":"filled"})"
+                             "\n";
 
     SUBCASE("partial JSON tail")
     {
@@ -140,14 +138,15 @@ TEST_CASE("a torn final line is dropped and the file is truncated")
 TEST_CASE("a corrupt line in the middle fails the replay")
 {
     const auto path = temp_log_path("corrupt_middle");
-    write_file(path,
-               R"({"type":"a"})" "\n"
-               "this is not json" "\n"
-               R"({"type":"b"})" "\n");
+    write_file(path, R"({"type":"a"})"
+                     "\n"
+                     "this is not json"
+                     "\n"
+                     R"({"type":"b"})"
+                     "\n");
     bool sink_called = false;
-    const auto stats = EventLog::replay(path, [&sink_called](const nlohmann::json&) {
-        sink_called = true;
-    });
+    const auto stats =
+        EventLog::replay(path, [&sink_called](const nlohmann::json&) { sink_called = true; });
     REQUIRE_FALSE(stats.is_ok());
     CHECK(stats.error().code == "persistence");
     CHECK(sink_called); // earlier lines were delivered before the failure
@@ -157,7 +156,8 @@ TEST_CASE("a corrupt line in the middle fails the replay")
 TEST_CASE("a parsable non-object line is corruption, not an event")
 {
     const auto path = temp_log_path("array_line");
-    write_file(path, R"({"type":"a"})" "\n[1,2,3]\n");
+    write_file(path, R"({"type":"a"})"
+                     "\n[1,2,3]\n");
     const auto stats = replayed_events(path);
     REQUIRE_FALSE(stats.is_ok());
     CHECK(stats.error().code == "persistence");

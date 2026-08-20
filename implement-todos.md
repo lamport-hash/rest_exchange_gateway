@@ -137,20 +137,55 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       suites); black-box client suite 44/44)
 
 ## Phase 4 — Second exchange (Binance WS) + truly agnostic gateway
-- [ ] 4.1 Mock Binance (in-process, from official docs): WS-API order.place /
+- [x] 4.1 Mock Binance (in-process, from official docs): WS-API order.place /
       order.cancel, executionReport stream, fault injection
-- [ ] 4.2 BinanceConnector fully coded: signed WS-API requests (testnet
-      wss://testnet.binance.vision/ws-api/v3), execution reports from
+      (tests/mocks/binance_mock_ws_server.{hpp,cpp}: one JSON request per
+      text frame with id correlation, SIGNED param verification incl.
+      recvWindow freshness (-1022/-2014/-1021), duplicate-open-clientOrderId
+      -4116, cancelReplace, openOrders.status; scripting: lost acks
+      (set_drop_next_response — outcome unknown), delayed replies, fills,
+      dropped/duplicated execution reports, kill_connections + abrupt
+      endpoint death/restart)
+- [x] 4.2 BinanceConnector fully coded: signed WS-API requests (testnet
+      wss://ws-api.testnet.binance.vision/ws-api/v3), execution reports from
       user-data stream, symbol translation BTC-USDT↔BTCUSDT, amend emulation
       via cancelReplace
-- [ ] 4.3 Venue-agnostic gateway: routing on `venue` field, per-venue
+      (src/exchange/binance/: signer — HMAC-SHA256 hex over the sorted
+      name=value payload, doc-vector tested; wire codecs + explicit state
+      mapping (EXPIRED/EXPIRED_IN_MATCH/PENDING_CANCEL→canceled); config
+      with recvWindow/requestTimeout/retry; BinanceWsClient — id-correlated
+      request/response over one connection, user-data stream subscribed on
+      the same session (userDataStream.subscribe.signature), serverShutdown/
+      eventStreamTerminated handling, backoff+jitter reconnect with
+      re-subscribe, pending requests fail transport (outcome unknown), 5xx
+      → transport per docs; resolve-then-retry place/cancel/amend mirroring
+      the OKX engine (venue:-2013 conclusive absence, -4116 duplicate
+      resolve, -2011 idempotent cancel resolution, cancelReplace partial
+      outcome surfaced); BinanceConnector over the unchanged
+      ExchangeConnector interface)
+- [x] 4.3 Venue-agnostic gateway: routing on `venue` field, per-venue
       config/limits, zero exchange code above the connector interface;
       startup re-establishes Binance WS state
-- [ ] 4.4 Deliverables: README (architecture, common schema, adapter design,
+      (OMS holds map<venue, ExchangeConnector*>; OrderRecord/events persist
+      the venue; cancel/amend/reconcile route via the record; reconcile
+      iterates every venue; risk projection sums instruments across venues;
+      ExchangeConnector::AmendRequest gained optional side/type/timeInForce
+      for cancel+replace venues (user-approved); OkxConnector::get_order now
+      normalizes conclusive absence (51603) to nullopt like Binance -2013;
+      REST: venue validated against configured venues (case-insensitive,
+      listed in the error), responses carry "venue"; config: "binance"
+      section + "defaultVenue"; gateway_main is the composition root)
+- [x] 4.4 Deliverables: README (architecture, common schema, adapter design,
       idempotency/retry strategy, auth-security discussion, trade-offs &
-      limitations); examples/ curl scripts for both venues; final pass:
+      limitations); examples/ curl scripts for both venues
+      (place_amend_cancel_both_venues.sh + place_and_cancel.sh); final pass:
       clang-format whole tree + full ctest both presets
+      (21/21 suites green debug+release; black-box suite 44/44 — plus a rig
+      fix: wait for the feed's first-connect reconcile before the venue-
+      traffic assertions, which used to race and flake)
 - [ ] 4.5 Stretch (optional): rate-limit awareness per exchange, sequence/gap
       detection, backpressure, property-based state-machine tests
       Acceptance: all project-spec deliverables present; both venues work
       through the single unified API
+      (2026-08-20: met for OKX (live demo + mock suites); Binance verified
+      against the doc-faithful mock (testnet needs user keys in config)

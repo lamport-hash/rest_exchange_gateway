@@ -52,7 +52,7 @@ add_executable(smoke apps/smoke.cpp)
 target_link_libraries(smoke PRIVATE gateway_warnings gateway_third_party)
 
 add_executable(gateway apps/gateway_main.cpp)
-target_link_libraries(gateway PRIVATE gateway_rest gateway_okx)
+target_link_libraries(gateway PRIVATE gateway_rest gateway_okx gateway_binance)
 
 add_library(gateway_core STATIC
     src/core/clock.cpp
@@ -78,6 +78,16 @@ add_library(gateway_okx STATIC
 )
 target_link_libraries(gateway_okx PUBLIC gateway_core)
 
+add_library(gateway_binance STATIC
+    src/exchange/binance/binance_signer.cpp
+    src/exchange/binance/binance_wire.cpp
+    src/exchange/binance/binance_config.cpp
+    src/exchange/binance/binance_api.cpp
+    src/exchange/binance/binance_ws_client.cpp
+    src/exchange/binance/binance_connector.cpp
+)
+target_link_libraries(gateway_binance PUBLIC gateway_core)
+
 add_library(gateway_rest STATIC
     src/rest/order_routes.cpp
 )
@@ -89,9 +99,10 @@ if(GATEWAY_BUILD_TESTS)
     add_library(gateway_test_support STATIC
         tests/mocks/okx_mock_server.cpp
         tests/mocks/okx_mock_ws_server.cpp
+        tests/mocks/binance_mock_ws_server.cpp
     )
     target_include_directories(gateway_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    target_link_libraries(gateway_test_support PUBLIC gateway_okx)
+    target_link_libraries(gateway_test_support PUBLIC gateway_okx gateway_binance)
 
     add_executable(smoke_test tests/smoke_test.cpp)
     target_include_directories(smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
@@ -161,6 +172,22 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(rest_api_test tests/rest_api_test.cpp)
     target_link_libraries(rest_api_test PRIVATE gateway_test_support gateway_rest)
     add_test(NAME rest_api_test COMMAND rest_api_test)
+
+    add_executable(binance_signer_test tests/binance_signer_test.cpp)
+    target_link_libraries(binance_signer_test PRIVATE gateway_binance)
+    add_test(NAME binance_signer_test COMMAND binance_signer_test)
+
+    add_executable(binance_wire_test tests/binance_wire_test.cpp)
+    target_link_libraries(binance_wire_test PRIVATE gateway_binance)
+    add_test(NAME binance_wire_test COMMAND binance_wire_test)
+
+    add_executable(binance_ws_client_test tests/binance_ws_client_test.cpp)
+    target_link_libraries(binance_ws_client_test PRIVATE gateway_test_support)
+    add_test(NAME binance_ws_client_test COMMAND binance_ws_client_test)
+
+    add_executable(binance_connector_test tests/binance_connector_test.cpp)
+    target_link_libraries(binance_connector_test PRIVATE gateway_test_support)
+    add_test(NAME binance_connector_test COMMAND binance_connector_test)
 
     # Standalone fake OKX venue (REST + WS + HTTP control plane) driven by
     # tests/blackbox/phase2_client_tests.sh; not a ctest case itself.

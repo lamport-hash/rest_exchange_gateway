@@ -21,7 +21,13 @@ struct GatewayConfig
     std::optional<std::filesystem::path> persistence_log;
     /// Pre-trade risk limits; empty = unlimited (warned at startup).
     RiskConfig risk;
+    /// Venue used when a client order omits the venue field.
+    std::string default_venue = "okx";
+    /// Raw venue sections; each exchange adapter parses its own (keeps
+    /// src/core free of exchange-specific knowledge). A section present
+    /// but empty {} means "venue enabled with default parameters".
     nlohmann::json okx = nlohmann::json::object();
+    nlohmann::json binance = nlohmann::json::object();
 };
 
 /// Load and structurally validate the gateway configuration.

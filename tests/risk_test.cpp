@@ -24,12 +24,12 @@ auto limits(std::string a_qty = "", std::string a_notional = "",
                                 .max_position = std::move(a_position)};
 }
 
-auto order(std::string a_qty, std::string a_px = "50000",
-           std::string a_position = "0") -> RiskOrder
+auto order(std::string a_qty, std::string a_px = "50000", std::string a_position = "0") -> RiskOrder
 {
-    return RiskOrder{
-        .side = Side::Buy, .price = std::move(a_px), .quantity = std::move(a_qty),
-        .projected_position = std::move(a_position)};
+    return RiskOrder{.side = Side::Buy,
+                     .price = std::move(a_px),
+                     .quantity = std::move(a_qty),
+                     .projected_position = std::move(a_position)};
 }
 
 } // namespace
@@ -50,13 +50,13 @@ TEST_CASE("risk_config_from_json parses defaults and per-instrument limits")
 
     const auto btc = config.limits_for("BTC-USDT");
     REQUIRE(btc.has_value());
-    CHECK(btc->max_qty == "1");           // instrument entry replaces defaults
-    CHECK(btc->max_notional.empty());     // ... wholesale, not merged
+    CHECK(btc->max_qty == "1");       // instrument entry replaces defaults
+    CHECK(btc->max_notional.empty()); // ... wholesale, not merged
     CHECK(btc->max_position == "0.5");
 
     const auto eth = config.limits_for("ETH-USDT");
     REQUIRE(eth.has_value());
-    CHECK(eth->max_qty == "10");          // falls back to defaults
+    CHECK(eth->max_qty == "10");                      // falls back to defaults
     CHECK(config.limits_for("SOL-USDT").has_value()); // defaults apply everywhere
 }
 
@@ -66,8 +66,8 @@ TEST_CASE("risk_config_from_json accepts empty and partial sections")
     REQUIRE(empty.is_ok());
     CHECK_FALSE(empty.value().limits_for("BTC-USDT").has_value());
 
-    const auto partial = risk_config_from_json(
-        nlohmann::json::parse(R"({"default":{"maxQty":"2"}})"));
+    const auto partial =
+        risk_config_from_json(nlohmann::json::parse(R"({"default":{"maxQty":"2"}})"));
     REQUIRE(partial.is_ok());
     const auto limits_btc = partial.value().limits_for("BTC-USDT");
     REQUIRE(limits_btc.has_value());
@@ -122,8 +122,7 @@ TEST_CASE("maxPosition is enforced symmetrically on both directions")
     const auto rule = limits("", "", "2");
     CHECK_FALSE(check_risk(rule, "BTC-USDT", order("1", "50000", "1")).has_value());
     CHECK_FALSE(check_risk(rule, "BTC-USDT", order("1", "50000", "-1.5")).has_value());
-    CHECK(check_risk(rule, "BTC-USDT", order("1", "50000", "2.5"))->code ==
-          "risk_max_position");
+    CHECK(check_risk(rule, "BTC-USDT", order("1", "50000", "2.5"))->code == "risk_max_position");
     CHECK(check_risk(rule, "BTC-USDT", order("1", "50000", "-2.0001"))->code ==
           "risk_max_position");
     CHECK(check_risk(rule, "BTC-USDT", order("1", "50000", "-2")).has_value() == false);
@@ -135,8 +134,7 @@ TEST_CASE("non-decimal order values fail closed")
     CHECK(check_risk(qty_rule, "BTC-USDT", order("lots"))->code == "risk_invalid_value");
 
     const auto notional_rule = limits("", "1000");
-    CHECK(check_risk(notional_rule, "BTC-USDT", order("1", "cheap"))->code ==
-          "risk_invalid_value");
+    CHECK(check_risk(notional_rule, "BTC-USDT", order("1", "cheap"))->code == "risk_invalid_value");
 
     const auto position_rule = limits("", "", "2");
     CHECK(check_risk(position_rule, "BTC-USDT", order("1", "50000", "none"))->code ==
