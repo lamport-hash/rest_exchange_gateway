@@ -51,6 +51,9 @@ endif()
 add_executable(smoke apps/smoke.cpp)
 target_link_libraries(smoke PRIVATE gateway_warnings gateway_third_party)
 
+add_executable(gateway apps/gateway_main.cpp)
+target_link_libraries(gateway PRIVATE gateway_rest gateway_okx)
+
 add_library(gateway_core STATIC
     src/core/clock.cpp
     src/core/config.cpp
@@ -68,6 +71,11 @@ add_library(gateway_okx STATIC
     src/exchange/okx/okx_connector.cpp
 )
 target_link_libraries(gateway_okx PUBLIC gateway_core)
+
+add_library(gateway_rest STATIC
+    src/rest/order_routes.cpp
+)
+target_link_libraries(gateway_rest PUBLIC gateway_core)
 
 if(GATEWAY_BUILD_TESTS)
     enable_testing()
@@ -110,4 +118,8 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(okx_connector_test tests/okx_connector_test.cpp)
     target_link_libraries(okx_connector_test PRIVATE gateway_test_support)
     add_test(NAME okx_connector_test COMMAND okx_connector_test)
+
+    add_executable(rest_api_test tests/rest_api_test.cpp)
+    target_link_libraries(rest_api_test PRIVATE gateway_test_support gateway_rest)
+    add_test(NAME rest_api_test COMMAND rest_api_test)
 endif()
