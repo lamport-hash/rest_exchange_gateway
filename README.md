@@ -56,7 +56,14 @@ Run the gateway (needs `config/gateway.json` — copy `config/gateway.example.js
 and fill in venue credentials; the file is gitignored):
 
 ```bash
+examples/run_gateway.sh                      # or manually:
 docker compose exec dev ./build/release/gateway config/gateway.json
+```
+
+Place then cancel a small demo limit order through the gateway:
+
+```bash
+examples/place_and_cancel.sh                 # optional: port instrument price qty
 ```
 
 REST surface (phase 1, OKX backend):
