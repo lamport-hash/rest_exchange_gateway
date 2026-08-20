@@ -5,6 +5,7 @@
     "persistence": {
         "logPath": "data/orders.jsonl"
     },
+    "defaultVenue": "okx",
     "risk": {
         "default": {
             "maxQty": "10",
@@ -45,6 +46,24 @@
             "path": "/ws/v5/private",
             "pingIntervalMs": 20000,
             "maxMissedPongs": 2
+        }
+    },
+    "binance": {
+        "apiKey": "YOUR_BINANCE_TESTNET_API_KEY",
+        "secretKey": "YOUR_BINANCE_TESTNET_SECRET_KEY",
+        "host": "ws-api.testnet.binance.vision",
+        "port": 443,
+        "useTls": true,
+        "path": "/ws-api/v3",
+        "recvWindowMs": 5000,
+        "requestTimeoutMs": 12000,
+        "retry": {
+            "maxAttempts": 3,
+            "initialBackoffMs": 100,
+            "maxBackoffMs": 2000,
+            "multiplier": 2.0,
+            "jitter": 0.5,
+            "budgetMs": 5000
         }
     }
 }

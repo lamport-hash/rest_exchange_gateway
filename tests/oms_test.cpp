@@ -53,7 +53,8 @@ class FakeConnector final : public ExchangeConnector
         placed.push_back(a_request);
         return place_impl(a_request);
     }
-    [[nodiscard]] auto cancel_order(const CancelRequest& a_request) -> Result<OrderPlacement> override
+    [[nodiscard]] auto
+    cancel_order(const CancelRequest& a_request) -> Result<OrderPlacement> override
     {
         cancels.push_back(a_request);
         return cancel_impl(a_request);
@@ -63,8 +64,8 @@ class FakeConnector final : public ExchangeConnector
         amends.push_back(a_request);
         return amend_impl(a_request);
     }
-    [[nodiscard]] auto get_order(const OrderQuery& a_query)
-        -> Result<std::optional<OrderSnapshot>> override
+    [[nodiscard]] auto
+    get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> override
     {
         return get_impl(a_query);
     }
@@ -72,8 +73,8 @@ class FakeConnector final : public ExchangeConnector
     {
         return open_impl();
     }
-    void set_execution_report_handler(
-        std::function<void(const ExecutionReport&)> a_handler) override
+    void
+    set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override
     {
         report_handler = std::move(a_handler);
     }
@@ -129,7 +130,7 @@ auto risk_with_position(const std::string& a_max_position) -> RiskConfig
 TEST_CASE("place records the accepted order and replays it idempotently")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     const auto first = oms.place(buy_request());
     REQUIRE(first.is_ok());
@@ -160,7 +161,7 @@ TEST_CASE("place records the accepted order and replays it idempotently")
 TEST_CASE("place after a terminal outcome still replays the recorded outcome")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     REQUIRE(oms.place(buy_request()).is_ok());
     REQUIRE(oms.cancel("gw1").is_ok());
@@ -175,7 +176,7 @@ TEST_CASE("place after a terminal outcome still replays the recorded outcome")
 TEST_CASE("risk rejections are recorded and replayed")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, risk_with_position("1")};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, risk_with_position("1")};
 
     const auto rejected = oms.place(buy_request("gw1", "5"));
     REQUIRE_FALSE(rejected.is_ok());
@@ -201,7 +202,7 @@ TEST_CASE("definitive venue rejections are recorded and replayed")
     connector.place_impl = [](const OrderRequest&) -> Result<OrderPlacement> {
         return Error{"venue:51001", "Instrument ID does not exist"};
     };
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     const auto rejected = oms.place(buy_request());
     REQUIRE_FALSE(rejected.is_ok());
@@ -225,7 +226,7 @@ TEST_CASE("transport-unresolved places record nothing; retry reaches the venue")
         }
         return OrderPlacement{.client_order_id = "gw1", .exchange_order_id = "ord-gw1"};
     };
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     const auto failed = oms.place(buy_request());
     REQUIRE_FALSE(failed.is_ok());
@@ -242,7 +243,7 @@ TEST_CASE("transport-unresolved places record nothing; retry reaches the venue")
 TEST_CASE("execution reports advance state and dedupe exactly")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     const auto partial = report("gw1", OrderState::PartiallyFilled, "0.4", "49999.5");
@@ -261,7 +262,7 @@ TEST_CASE("execution reports advance state and dedupe exactly")
 TEST_CASE("out-of-order reports never regress state or fills")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     oms.on_execution_report(report("gw1", OrderState::PartiallyFilled, "0.4", "49999.5"));
@@ -278,7 +279,7 @@ TEST_CASE("out-of-order reports never regress state or fills")
 TEST_CASE("REST-vs-WS race: fill report wins over later stale snapshot data")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     // WS delivers the fill...
@@ -296,7 +297,7 @@ TEST_CASE("REST-vs-WS race: fill report wins over later stale snapshot data")
 TEST_CASE("terminal orders ignore state regression but keep late fill data")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     oms.on_execution_report(report("gw1", OrderState::Canceled, "0"));
@@ -305,13 +306,13 @@ TEST_CASE("terminal orders ignore state regression but keep late fill data")
     const auto record = oms.query("gw1");
     REQUIRE(record.is_ok());
     CHECK(record.value().state == OrderState::Canceled); // state never regressed
-    CHECK(record.value().filled_quantity == "1"); // fill information is kept
+    CHECK(record.value().filled_quantity == "1");        // fill information is kept
 }
 
 TEST_CASE("reports for unknown orders are counted, not applied")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     oms.on_execution_report(report("ghost", OrderState::Filled, "1"));
     CHECK(oms.stats().reports_unknown == 1);
     CHECK_FALSE(oms.query("ghost").is_ok());
@@ -320,7 +321,7 @@ TEST_CASE("reports for unknown orders are counted, not applied")
 TEST_CASE("late fill data still lands after the state went terminal")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     // venue canceled a partially filled order; the fill report races in
@@ -339,7 +340,7 @@ TEST_CASE("late fill data still lands after the state went terminal")
 TEST_CASE("cancel is idempotent and rejects terminal orders clearly")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     const auto missing = oms.cancel("gw1");
     REQUIRE_FALSE(missing.is_ok());
@@ -363,7 +364,7 @@ TEST_CASE("cancel is idempotent and rejects terminal orders clearly")
 TEST_CASE("cancel of a filled order is order_terminal, not a venue call")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
     oms.on_execution_report(report("gw1", OrderState::Filled, "1"));
 
@@ -376,7 +377,7 @@ TEST_CASE("cancel of a filled order is order_terminal, not a venue call")
 TEST_CASE("amend updates the record after the venue accepts")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     const auto amended = oms.amend(
@@ -396,21 +397,21 @@ TEST_CASE("amend updates the record after the venue accepts")
 TEST_CASE("amend validates its inputs and the order's liveness")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
 
     const auto nothing = oms.amend(AmendCommand{"gw1", std::nullopt, std::nullopt});
     REQUIRE_FALSE(nothing.is_ok());
     CHECK(nothing.error().code == "protocol");
 
-    const auto missing = oms.amend(AmendCommand{"ghost", std::optional<std::string>{"1"},
-                                                std::nullopt});
+    const auto missing =
+        oms.amend(AmendCommand{"ghost", std::optional<std::string>{"1"}, std::nullopt});
     REQUIRE_FALSE(missing.is_ok());
     CHECK(missing.error().code == "not_found");
 
     REQUIRE(oms.place(buy_request()).is_ok());
     REQUIRE(oms.cancel("gw1").is_ok());
-    const auto terminal = oms.amend(
-        AmendCommand{"gw1", std::optional<std::string>{"1"}, std::nullopt});
+    const auto terminal =
+        oms.amend(AmendCommand{"gw1", std::optional<std::string>{"1"}, std::nullopt});
     REQUIRE_FALSE(terminal.is_ok());
     CHECK(terminal.error().code == "order_terminal");
     CHECK(connector.amends.empty());
@@ -419,17 +420,16 @@ TEST_CASE("amend validates its inputs and the order's liveness")
 TEST_CASE("amends re-run risk against the projected position")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, risk_with_position("1")};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, risk_with_position("1")};
 
     REQUIRE(oms.place(buy_request("gw1", "1")).is_ok());
-    const auto grow = oms.amend(AmendCommand{"gw1", std::nullopt,
-                                             std::optional<std::string>{"3"}});
+    const auto grow = oms.amend(AmendCommand{"gw1", std::nullopt, std::optional<std::string>{"3"}});
     REQUIRE_FALSE(grow.is_ok());
     CHECK(grow.error().code == "risk_max_position");
     CHECK(connector.amends.empty());
 
-    const auto shrink = oms.amend(AmendCommand{"gw1", std::nullopt,
-                                               std::optional<std::string>{"0.5"}});
+    const auto shrink =
+        oms.amend(AmendCommand{"gw1", std::nullopt, std::optional<std::string>{"0.5"}});
     REQUIRE(shrink.is_ok());
     CHECK(shrink.value().quantity == "0.5");
 }
@@ -437,7 +437,7 @@ TEST_CASE("amends re-run risk against the projected position")
 TEST_CASE("hedged buy+sell exposure nets out in the position projection")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, risk_with_position("1")};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, risk_with_position("1")};
 
     REQUIRE(oms.place(buy_request("b1", "1")).is_ok());
     auto sell = buy_request("s1", "1");
@@ -462,7 +462,7 @@ TEST_CASE("a full lifecycle persists and replays into an identical registry")
     {
         FakeConnector connector;
         EventLog log{path};
-        OrderManagementSystem oms{connector, &log, RiskConfig{}};
+        OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
 
         REQUIRE(oms.place(buy_request("gw1", "1")).is_ok());
         oms.on_execution_report(report("gw1", OrderState::PartiallyFilled, "0.4", "49999.5"));
@@ -475,7 +475,7 @@ TEST_CASE("a full lifecycle persists and replays into an identical registry")
 
     FakeConnector connector;
     EventLog log{path};
-    OrderManagementSystem recovered{connector, &log, RiskConfig{}};
+    OrderManagementSystem recovered{{{"okx", &connector}}, &log, RiskConfig{}};
     const auto stats = recovered.load_from_log();
     REQUIRE(stats.is_ok());
     CHECK(stats.value().events > 0);
@@ -500,14 +500,14 @@ TEST_CASE("rejections persist and replay as deterministic rejections")
     {
         FakeConnector connector;
         EventLog log{path};
-        OrderManagementSystem oms{connector, &log, risk_with_position("1")};
+        OrderManagementSystem oms{{{"okx", &connector}}, &log, risk_with_position("1")};
         const auto rejected = oms.place(buy_request("gw1", "5"));
         REQUIRE_FALSE(rejected.is_ok());
     }
 
     FakeConnector connector;
     EventLog log{path};
-    OrderManagementSystem recovered{connector, &log, RiskConfig{}};
+    OrderManagementSystem recovered{{{"okx", &connector}}, &log, RiskConfig{}};
     REQUIRE(recovered.load_from_log().is_ok());
 
     const auto replayed = recovered.place(buy_request("gw1", "5"));
@@ -523,7 +523,7 @@ TEST_CASE("load_from_log survives a torn tail")
     {
         FakeConnector connector;
         EventLog log{path};
-        OrderManagementSystem oms{connector, &log, RiskConfig{}};
+        OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
         REQUIRE(oms.place(buy_request("gw1")).is_ok());
     }
     {
@@ -533,7 +533,7 @@ TEST_CASE("load_from_log survives a torn tail")
 
     FakeConnector connector;
     EventLog log{path};
-    OrderManagementSystem recovered{connector, &log, RiskConfig{}};
+    OrderManagementSystem recovered{{{"okx", &connector}}, &log, RiskConfig{}};
     const auto stats = recovered.load_from_log();
     REQUIRE(stats.is_ok());
     CHECK(stats.value().tail_truncated);
@@ -549,7 +549,7 @@ TEST_CASE("a corrupt mid-file log fails load_from_log")
     {
         FakeConnector connector;
         EventLog log{path};
-        OrderManagementSystem oms{connector, &log, RiskConfig{}};
+        OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
         REQUIRE(oms.place(buy_request("gw1")).is_ok());
     }
     {
@@ -559,7 +559,7 @@ TEST_CASE("a corrupt mid-file log fails load_from_log")
 
     FakeConnector connector;
     EventLog log{path};
-    OrderManagementSystem recovered{connector, &log, RiskConfig{}};
+    OrderManagementSystem recovered{{{"okx", &connector}}, &log, RiskConfig{}};
     const auto stats = recovered.load_from_log();
     REQUIRE_FALSE(stats.is_ok());
     CHECK(stats.error().code == "persistence");
@@ -586,16 +586,15 @@ TEST_CASE("reconcile adopts venue-live orders missing from the registry")
     connector.open_impl = [&venue_order]() -> Result<std::vector<OrderSnapshot>> {
         return std::vector<OrderSnapshot>{venue_order};
     };
-    connector.get_impl = [&venue_order](const OrderQuery& a_query)
-        -> Result<std::optional<OrderSnapshot>> {
+    connector.get_impl =
+        [&venue_order](const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> {
         if (a_query.client_order_id == "venueonly") {
-            return Result<std::optional<OrderSnapshot>>{
-                std::optional<OrderSnapshot>{venue_order}};
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{venue_order}};
         }
         return Error{"venue:51603", "Order does not exist"};
     };
     EventLog log{path};
-    OrderManagementSystem oms{connector, &log, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
 
     const auto report = oms.reconcile();
     CHECK(report.adopted == 1);
@@ -608,7 +607,7 @@ TEST_CASE("reconcile adopts venue-live orders missing from the registry")
     CHECK(record.value().filled_quantity == "1");
 
     // the adoption itself persists: a restart learns it from the log
-    OrderManagementSystem restarted{connector, &log, RiskConfig{}};
+    OrderManagementSystem restarted{{{"okx", &connector}}, &log, RiskConfig{}};
     REQUIRE(restarted.load_from_log().is_ok());
     const auto replayed = restarted.query("venueonly");
     REQUIRE(replayed.is_ok());
@@ -621,26 +620,25 @@ TEST_CASE("reconcile resolves, rejects-absent, and keeps live entries")
     FakeConnector connector;
     EventLog log{temp_log_path("resolve")};
     std::filesystem::remove(log.path());
-    OrderManagementSystem oms{connector, &log, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
 
     REQUIRE(oms.place(buy_request("filled1")).is_ok());
     REQUIRE(oms.place(buy_request("absent1")).is_ok());
     REQUIRE(oms.place(buy_request("stale1")).is_ok());
 
-    connector.get_impl = [](const OrderQuery& a_query)
-        -> Result<std::optional<OrderSnapshot>> {
+    connector.get_impl = [](const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> {
         if (a_query.client_order_id == "filled1") {
-            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{
-                OrderSnapshot{.client_order_id = "filled1",
-                              .exchange_order_id = "ord-filled1",
-                              .instrument_id = "BTC-USDT",
-                              .state = OrderState::Filled,
-                              .side = Side::Buy,
-                              .type = OrderType::Limit,
-                              .price = "50000",
-                              .quantity = "1",
-                              .filled_quantity = "1",
-                              .average_fill_price = "50000"}}};
+            return Result<std::optional<OrderSnapshot>>{
+                std::optional<OrderSnapshot>{OrderSnapshot{.client_order_id = "filled1",
+                                                           .exchange_order_id = "ord-filled1",
+                                                           .instrument_id = "BTC-USDT",
+                                                           .state = OrderState::Filled,
+                                                           .side = Side::Buy,
+                                                           .type = OrderType::Limit,
+                                                           .price = "50000",
+                                                           .quantity = "1",
+                                                           .filled_quantity = "1",
+                                                           .average_fill_price = "50000"}}};
         }
         if (a_query.client_order_id == "absent1") {
             return Error{"venue:51603", "Order does not exist"};
@@ -674,7 +672,7 @@ TEST_CASE("reconcile tolerates a failing pending listing")
     connector.open_impl = []() -> Result<std::vector<OrderSnapshot>> {
         return Error{"transport", "orders-pending unreachable"};
     };
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
@@ -697,7 +695,7 @@ TEST_CASE("restart drill: replay + reconcile reconstructs in-flight fills")
     {
         FakeConnector connector;
         EventLog log{path};
-        OrderManagementSystem oms{connector, &log, RiskConfig{}};
+        OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
         REQUIRE(oms.place(buy_request("gw1", "2")).is_ok());
     }
 
@@ -716,18 +714,17 @@ TEST_CASE("restart drill: replay + reconcile reconstructs in-flight fills")
     connector.open_impl = [&venue_state]() -> Result<std::vector<OrderSnapshot>> {
         return std::vector<OrderSnapshot>{venue_state};
     };
-    connector.get_impl = [&venue_state](const OrderQuery& a_query)
-        -> Result<std::optional<OrderSnapshot>> {
+    connector.get_impl =
+        [&venue_state](const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> {
         if (a_query.client_order_id == "gw1") {
-            return Result<std::optional<OrderSnapshot>>{
-                std::optional<OrderSnapshot>{venue_state}};
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{venue_state}};
         }
         return Error{"venue:51603", "Order does not exist"};
     };
 
     // instance 2: replay the log, then reconcile with the venue
     EventLog log{path};
-    OrderManagementSystem oms{connector, &log, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
     REQUIRE(oms.load_from_log().is_ok());
     const auto report = oms.reconcile();
     CHECK(report.updated >= 1);
@@ -749,7 +746,7 @@ TEST_CASE("restart drill: replay + reconcile reconstructs in-flight fills")
 TEST_CASE("stats expose registry size and arbitration counters")
 {
     FakeConnector connector;
-    OrderManagementSystem oms{connector, nullptr, RiskConfig{}};
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     REQUIRE(oms.place(buy_request()).is_ok());
 
     oms.on_execution_report(report("gw1", OrderState::Live, "0"));

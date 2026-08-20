@@ -67,6 +67,13 @@ struct AmendRequest
     std::string instrument_id;
     std::optional<std::string> new_price;
     std::optional<std::string> new_quantity;
+    /// Attributes of the RESULTING order, needed only by venues whose
+    /// amend is a cancel+replace (Binance); in-place amend venues (OKX)
+    /// ignore them. Callers that know the original order should always
+    /// provide them.
+    std::optional<Side> side;
+    std::optional<OrderType> type;
+    std::string time_in_force;
 };
 
 /// Acknowledgement of place/cancel/amend: venue accepted the request.

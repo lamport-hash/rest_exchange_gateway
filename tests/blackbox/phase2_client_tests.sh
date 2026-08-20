@@ -186,6 +186,13 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
+# Wait for the execution feed's first connect: it fires a reconcile whose
+# per-order lookups would otherwise race the venue-traffic assertions below.
+for _ in $(seq 1 100); do
+    [ "$(grep -c '"event":"reconcile"' "$WORK/gateway.log" 2>/dev/null || true)" -ge 2 ] && break
+    sleep 0.1
+done
+
 # ---- 1. health ------------------------------------------------------------
 echo "== 1. health =="
 gw GET /health

@@ -123,6 +123,13 @@ auto OkxConnector::get_order(const OrderQuery& a_query) -> Result<std::optional<
     const auto attempt = [this, &wire_query]() -> Result<std::optional<OrderSnapshot>> {
         const auto info = client_.get_order(wire_query);
         if (!info.is_ok()) {
+            // "The order does not exist" is a conclusive absence, not a
+            // failure — normalize to nullopt so the venue-agnostic core
+            // treats every exchange the same way.
+            if (info.error().code == "venue:51603") {
+                return Result<std::optional<OrderSnapshot>>{
+                    std::optional<OrderSnapshot>{std::nullopt}};
+            }
             return info.error();
         }
         if (!info.value().has_value()) {
