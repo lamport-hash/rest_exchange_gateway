@@ -20,13 +20,17 @@ auto field_string(const nlohmann::json& a_item, const char* a_name) -> std::stri
 
 auto to_json(const OkxPlaceRequest& a_request) -> nlohmann::json
 {
-    return {{"clOrdId", a_request.cl_ord_id},
-            {"instId", a_request.inst_id},
-            {"tdMode", a_request.td_mode},
-            {"side", a_request.side},
-            {"ordType", a_request.ord_type},
-            {"px", a_request.px},
-            {"sz", a_request.sz}};
+    nlohmann::json body = {{"clOrdId", a_request.cl_ord_id},
+                           {"instId", a_request.inst_id},
+                           {"tdMode", a_request.td_mode},
+                           {"side", a_request.side},
+                           {"ordType", a_request.ord_type},
+                           {"px", a_request.px},
+                           {"sz", a_request.sz}};
+    if (a_request.px.empty()) {
+        body.erase("px");
+    }
+    return body;
 }
 
 auto to_json(const OkxCxlRequest& a_request) -> nlohmann::json

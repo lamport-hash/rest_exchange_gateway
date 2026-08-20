@@ -55,13 +55,17 @@ add_library(gateway_core STATIC
     src/core/clock.cpp
     src/core/config.cpp
 )
-target_include_directories(gateway_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(gateway_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 target_link_libraries(gateway_core PUBLIC gateway_warnings gateway_third_party)
 
 add_library(gateway_okx STATIC
     src/exchange/okx/okx_signer.cpp
     src/exchange/okx/okx_wire.cpp
     src/exchange/okx/okx_rest_client.cpp
+    src/exchange/okx/okx_connector.cpp
 )
 target_link_libraries(gateway_okx PUBLIC gateway_core)
 
@@ -102,4 +106,8 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(okx_rest_client_test tests/okx_rest_client_test.cpp)
     target_link_libraries(okx_rest_client_test PRIVATE gateway_test_support)
     add_test(NAME okx_rest_client_test COMMAND okx_rest_client_test)
+
+    add_executable(okx_connector_test tests/okx_connector_test.cpp)
+    target_link_libraries(okx_connector_test PRIVATE gateway_test_support)
+    add_test(NAME okx_connector_test COMMAND okx_connector_test)
 endif()

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "core/result.hpp"
 #include "exchange/okx/okx_wire.hpp"
+#include "gateway/result.hpp"
 
 #include <functional>
 #include <nlohmann/json.hpp>

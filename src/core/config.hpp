@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/result.hpp"
+#include "gateway/result.hpp"
 
 #include <cstdint>
 #include <filesystem>
