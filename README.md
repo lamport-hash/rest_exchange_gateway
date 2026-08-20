@@ -1,10 +1,158 @@
 # rest_exchange_gateway
 
-REST gateway exposing one unified API over multiple cryptocurrency exchanges
-(OKX first, Binance later). C++20, Crow, cpp-httplib, nlohmann/json, doctest.
+A REST gateway exposing **one unified order API over two exchanges**
+(OKX and Binance). Clients speak a single schema; adapters translate to
+each venue's native protocol and normalize everything back. C++20, Crow,
+cpp-httplib, nlohmann/json, doctest.
 
 Spec: `doc/project-spec.md` — Architecture: `doc/project-archi.md` —
 Plan: `doc/implementation-plan.md` / `implement-todos.md`.
+
+## Architecture
+
+```
+            ┌────────────────────────────────────────────────┐
+Client ─HTTP│ Crow REST layer (src/rest/)                     │
+            │  one schema, one error format, zero venue code  │
+            ├────────────────────────────────────────────────┤
+            │ OMS core (src/core/)                            │
+            │  clientOrderId registry + venue routing         │
+            │  order state machine · pre-trade risk           │
+            │  append-only event log (restart recovery)       │
+            ├──────────────────┬─────────────────────────────┤
+            │ ExchangeConnector│ (include/gateway/) — the ONLY │
+            │ seam: place/cancel/amend/get/open-orders +      │
+            │ execution-report & connectivity callbacks       │
+            ├──────────────────┴─────────────────────────────┤
+            │ OKX adapter (src/exchange/okx/)                │
+            │  REST order entry + WS private orders feed      │
+            ├────────────────────────────────────────────────┤
+            │ Binance adapter (src/exchange/binance/)         │
+            │  WS-API order entry + user-data-stream reports  │
+            └────────────────────────────────────────────────┘
+```
+
+- Exchange-specific code lives **only** inside its adapter directory and is
+  never referenced above `ExchangeConnector` (`include/gateway/exchange_connector.hpp`).
+  The composition root (`apps/gateway_main.cpp`) is the single place that
+  instantiates concrete connectors and registers them with the OMS
+  (`{"okx", …}, {"binance", …}`).
+- The OMS owns all state: one registry keyed by the globally unique
+  `clientOrderId`; every record carries its venue so cancels, amends and
+  reconciliation route correctly.
+
+## Common order schema
+
+```json
+POST /orders
+{
+  "clientOrderId": "order-123",      // 1-32 alphanumeric, gateway-enforced
+  "venue": "OKX | BINANCE",          // optional; default from config
+  "symbol": "BTC-USDT",              // gateway spelling everywhere
+  "side": "buy | sell",
+  "type": "limit | market",
+  "price": "30000",                  // required for limit, rejected for market
+  "quantity": "0.1",
+  "timeInForce": "GTC | IOC | FOK"   // optional, limit orders only
+}
+```
+
+- Clients never send exchange-specific fields; unknown fields are rejected
+  with a 400 that names them.
+- Symbols stay `BTC-USDT` at the REST boundary; the Binance adapter
+  translates to `BTCUSDT` on the wire and back on every response
+  (`SymbolTranslator`, memoized with a quote-suffix fallback).
+- Normalized states: `live`, `partially_filled`, `filled`, `canceled`,
+  `rejected` — venue spellings map through explicit per-adapter tables
+  (Binance `EXPIRED`/`EXPIRED_IN_MATCH`/`PENDING_CANCEL` → canceled, etc.).
+- Full REST surface: `POST /orders`, `GET /orders/{id}`, `DELETE /orders/{id}`
+  (idempotent), `PUT /orders/{id}` (amend), `GET /health`.
+  Errors are always `{"error":{"code","reason","clientOrderId"}}`.
+
+## Adapter design (OKX vs Binance)
+
+The two adapters implement the same interface over fundamentally different
+transports, and both pair **request execution** with **resolve-then-retry
+semantics** so an unknown outcome is resolved by lookup before any re-send:
+
+| | OKX (`src/exchange/okx/`) | Binance (`src/exchange/binance/`) |
+|---|---|---|
+| Order entry | signed REST `POST /api/v5/trade/*` (HMAC-SHA256 **base64**, `OK-ACCESS-*` headers, demo header `x-simulated-trading: 1`) | signed WS-API requests `order.place` / `order.cancel` / `order.cancelReplace` (HMAC-SHA256 **hex** over the alphabetically sorted `name=value&…` payload) |
+| Amend | native `POST /api/v5/trade/amend-order` (same orderId) | emulated with `order.cancelReplace` (`STOP_ON_FAILURE`): same clientOrderId, **new** exchange orderId; the OMS records the replacement id |
+| Execution updates | private WS `orders` channel (login → subscribe → text ping/pong keepalive) | User Data Stream `executionReport` events subscribed **on the same WS-API connection** (`userDataStream.subscribe.signature`) |
+| Unknown outcome | transport failure → `GET /api/v5/trade/order`; found → synthesized ack; conclusively absent → identical re-send; unresolved → fail `transport` **without** re-send | response timeout / disconnect / 5xx → `order.status`; same three-way resolution (`venue:-2013` = conclusive absence; duplicate-open-clientOrderId `-4116` → resolve to the existing order) |
+| Reconnect | backoff+jitter, re-login, re-subscribe; watchdog closes silent connections | backoff+jitter, re-subscribe user-data stream; pending requests fail `transport`; late responses dropped by request-id |
+| Idempotent cancel | cancel-of-canceled resolves to success; cancel-of-filled is rejected | same, via `order.status` after `-2011` |
+
+Both feeds surface connectivity to the core, which **reconciles after every
+reconnect** (missed fills are recovered, not guessed).
+
+## Idempotency and retry strategy
+
+Three layers, each with one job:
+
+1. **Client idempotency (OMS).** A known `clientOrderId` replays its recorded
+   outcome verbatim — identical ack or identical rejection — with no venue
+   call. Risk-rejected and venue-rejected places are recorded as terminal
+   `rejected` and replay deterministically. Only transport-unresolved places
+   record nothing and let the client retry safely (layer 3).
+2. **Report arbitration (state machine).** Duplicate, out-of-order and
+   REST-vs-WS racing observations all funnel through one explicit
+   transition table; illegal transitions are discarded and filled quantity
+   is a monotonic high-water mark, so no report can regress an order.
+3. **Resolve-then-retry (adapters).** Backoff+jitter with a wall-clock
+   budget for pure transport failures; for actions with side effects the
+   adapter first *resolves the true outcome* via a point query and only
+   re-sends when the venue conclusively never saw the request. There is no
+   code path that can double-place an order.
+
+**Restart recovery:** startup replays the append-only JSONL log (torn-tail
+safe), then reconciles with *every* venue: venue-live orders missing locally
+are adopted, fills refreshed, non-terminal entries resolved (venue-absent →
+terminal `rejected`; unreachable → kept, warned). Binance's execution state
+is re-established by the user-data-stream subscription on the fresh
+connection.
+
+## Pre-trade risk
+
+Config-driven per instrument (`risk.default` + `risk.instruments`), exact
+fixed-point arithmetic (`src/core/decimal.cpp`, no floats):
+
+- `maxQty` — order size cap
+- `maxNotional` — price × quantity cap (skipped for market orders: no price
+  feed pre-trade — documented limitation)
+- `maxPosition` — worst-case |position| if every working order fully fills
+  (fills so far + outstanding, signed by side, **summed across venues**)
+
+Rejections return 400 with machine-readable `risk_*` codes and a
+human-readable reason; amends re-run the checks against the amended values.
+
+## Security discussion (credentials)
+
+The spec explicitly scopes out secure key management: API keys/secrets are
+read from a JSON config file in plain text, matching the "insecure by
+design" allowance. For production, the defensible minimum would be: secrets
+from a KMS/Vault with short-lived tokens, per-venue IP allow-lists, read of
+secrets at startup only (never re-read), structured logs that never emit
+keys or signatures (currently true), and separate trade-only keys with
+withdrawals disabled (true for both OKX demo and Binance testnet keys).
+
+## Testing
+
+- `ctest --preset debug` (ASan+UBSan) and `--preset release` must both be
+  green: **21 suites** — state-machine matrix, decimal/risk vectors, OMS
+  (idempotency, dedup, races, recovery, reconciliation), per-adapter wire
+  codecs (signer vectors straight from the official docs), and full
+  connector behavior against **in-process mock venues** built from the
+  official API docs (`tests/mocks/`): fault injection covers dropped
+  requests, lost acks (outcome unknown), delayed responses, duplicate and
+  dropped reports, WS kills and endpoint death/restart.
+- Black-box client rig (`tests/blackbox/`, 44 assertions) drives the real
+  gateway binary over HTTP against a standalone fake OKX venue.
+- Live OKX demo suite (`tests/live/okx_live_func_tests.sh`, 68 assertions,
+  no mocks) and runbook (`doc/exchanges_func.md`).
+
+All network-dependent behavior is mocked; CI never needs connectivity.
 
 ## Requirements
 
@@ -52,50 +200,40 @@ Format code:
 docker compose exec dev clang-format -i src/**/*.{hpp,cpp} tests/**/*.hpp tests/**/*.cpp apps/*.cpp
 ```
 
-Run the gateway (needs `config/gateway.json` — copy `config/gateway.example.json`
-and fill in venue credentials; the file is gitignored):
+## Running the gateway
+
+Needs `config/gateway.json` (copy `config/gateway.example.json`, fill in
+venue credentials; the file is gitignored). Each venue section is optional
+but at least one must be present — with both, the gateway routes on the
+`venue` field and uses `defaultVenue` when it is omitted:
 
 ```bash
 examples/run_gateway.sh                      # or manually:
 docker compose exec dev ./build/release/gateway config/gateway.json
 ```
 
-Place then cancel a small demo limit order through the gateway:
+- OKX: demo trading (`x-simulated-trading: 1`) against `www.okx.com`
+- Binance: Spot **testnet** (`wss://ws-api.testnet.binance.vision/ws-api/v3`)
+
+Exercise both venues through the single API (place, amend, cancel on each,
+plus a default-venue place):
 
 ```bash
-examples/place_and_cancel.sh                 # optional: port instrument price qty
+examples/place_amend_cancel_both_venues.sh
+examples/place_and_cancel.sh                 # single-venue variant
 ```
 
-Black-box Phase 2 client suite — a one-shot Docker container acting as an
-external client: it starts a scriptable fake OKX venue (`mock_okx_env`:
-REST + private WS + HTTP fault-control plane) plus the real gateway binary,
-then drives every resilience point over HTTP with curl (retry on dropped /
-delayed responses, idempotent place/cancel retries, no double-applied
-orders, WS execution reports, disconnect/reconnect, venue death/recovery):
+Black-box client suite against the real binary + fake venue:
 
 ```bash
 tests/blackbox/run_docker_client.sh          # 44 assertions, ~10 seconds
-# or directly inside the dev container:
-docker compose exec dev tests/blackbox/phase2_client_tests.sh
 ```
 
-REST surface (phase 3: OMS-backed, OKX backend):
+Live OKX demo suite (needs real demo credentials in the config):
 
-- `POST /orders` — `{"clientOrderId","venue":"OKX","symbol":"BTC-USDT","side":"buy|sell","type":"limit|market","price","quantity","timeInForce":"GTC|IOC|FOK"}` → 201 (venue/timeInForce optional; unknown fields rejected — no exchange-specific parameters)
-- `GET /orders/{clientOrderId}` → unified order snapshot from the gateway registry (execution reports from the venue WebSocket keep it current)
-- `DELETE /orders/{clientOrderId}` → idempotent cancel
-- `PUT /orders/{clientOrderId}` — `{"price","quantity"}` (either/both) → amend
-- `GET /health` → `{"status":"ok","knownOrders",...}`
-- Errors: `{"error":{"code","reason","clientOrderId"}}` (400 invalid request
-  or `risk_*` pre-trade rejection, 404 not found, 409 venue rejected /
-  order terminal, 502 venue unreachable, 500 internal)
-- Idempotency is strict: once a clientOrderId is known, retried places
-  replay the recorded outcome (identical ack or identical rejection);
-  duplicate/out-of-order execution reports never regress state (explicit
-  transition table; filled quantity is a monotonic high-water mark)
-- State survives restarts: append-only JSONL event log (torn-tail safe) +
-  startup/reconnect reconciliation with the venue (orders-pending
-  adoption, terminal resolution, absent orders marked rejected)
+```bash
+tests/live/okx_live_func_tests.sh            # runbook: doc/exchanges_func.md
+```
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
 
@@ -103,4 +241,27 @@ Stop everything (named volumes `build/` and `ccache/` are kept):
 docker compose down
 ```
 
-A production multi-stage build for the final binary will be added later.
+## Trade-offs and known limitations
+
+- **Single OMS mutex.** Venue calls are made under the registry lock — a
+  slow venue delays other orders. Deliberate: no re-validation races, and
+  the REST layer only ever waits on this one mutex. Hot-path lock-free
+  structures were out of scope (spec: no ultra-low-latency target).
+- **Binance amend is cancel+replace**, not an in-place amend: the exchange
+  orderId changes and the old order's fills are not carried over
+  (partially-filled amends re-quote the remaining size as a fresh order).
+  The unified `clientOrderId` keeps the client view coherent.
+- **Market-order notional check skipped** (no price feed pre-trade).
+- **Position limit is approximate** (worst-case projection, no netting
+  against balances), and cross-venue by design — conservative by summing.
+- **openOrders pagination**: OKX pending orders are fetched as a single
+  page (≤100, documented); Binance returns all.
+- **Symbol translation is heuristic for unseen manual orders** on Binance
+  (longest quote-suffix match); gateway-placed orders are always memoized
+  exactly.
+- **24h Binance connection lifetime** and venue `serverShutdown` events are
+  handled by unbounded reconnect with backoff, not graceful pre-emptive
+  rotation.
+- **Credentials in plain-text config** — see the security discussion above.
+- `std::print`/`std::expected` (C++23) are deliberately avoided; the
+  codebase is strict C++20 with a local `Result<T>`.

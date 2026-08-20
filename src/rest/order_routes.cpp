@@ -126,8 +126,11 @@ auto type_to_string(OrderType a_type) -> std::string_view
 /// Structured mapping of OMS/connector error codes to HTTP responses.
 auto map_error(const Error& a_error, std::string_view a_client_order_id) -> crow::response
 {
+    if (a_error.code == "invalid_request") {
+        return error_response(400, "invalid_request", a_error.message, a_client_order_id);
+    }
     if (a_error.code == "not_found" || a_error.code == "venue:51016" ||
-        a_error.code == "venue:51603") {
+        a_error.code == "venue:-2013" || a_error.code == "venue:51603") {
         return error_response(404, "not_found", a_error.message, a_client_order_id);
     }
     if (a_error.code == "order_terminal") {
@@ -160,6 +163,7 @@ auto record_json(const OrderRecord& a_record) -> nlohmann::json
     return {{"clientOrderId", a_record.client_order_id},
             {"exchangeOrderId", a_record.exchange_order_id},
             {"symbol", a_record.symbol},
+            {"venue", a_record.venue},
             {"side", side_to_string(a_record.side)},
             {"type", type_to_string(a_record.type)},
             {"timeInForce", a_record.time_in_force},
@@ -259,11 +263,24 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                                           "clientOrderId must be 1-32 alphanumeric characters",
                                           request.client_order_id);
                 }
-                if (const auto venue = optional_string_field(*body, "venue")) {
-                    if (to_lower(*venue) != "okx") {
+                std::string venue; // empty -> OMS default venue
+                if (const auto venue_field = optional_string_field(*body, "venue")) {
+                    venue = to_lower(*venue_field);
+                    const auto supported = a_oms.venues();
+                    if (std::find(supported.begin(), supported.end(), venue) == supported.end()) {
+                        std::string names;
+                        for (const auto& candidate : supported) {
+                            if (!names.empty()) {
+                                names += ", ";
+                            }
+                            for (const char c : candidate) {
+                                names +=
+                                    static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                            }
+                        }
                         return error_response(400, "invalid_request",
-                                              "unsupported venue \"" + *venue +
-                                                  "\" (supported: OKX)",
+                                              "unsupported venue \"" + *venue_field +
+                                                  "\" (supported: " + names + ")",
                                               request.client_order_id);
                     }
                 }
@@ -321,7 +338,7 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                                           request.client_order_id);
                 }
 
-                const auto outcome = a_oms.place(request);
+                const auto outcome = a_oms.place(request, venue);
                 if (!outcome.is_ok()) {
                     return map_error(outcome.error(), request.client_order_id);
                 }
@@ -329,6 +346,7 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                     {"clientOrderId", outcome.value().record.client_order_id},
                     {"exchangeOrderId", outcome.value().record.exchange_order_id},
                     {"symbol", outcome.value().record.symbol},
+                    {"venue", outcome.value().record.venue},
                     {"state", to_string(outcome.value().record.state)},
                     {"replayed", outcome.value().replayed}};
                 return json_response(201, response);
@@ -365,6 +383,7 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                         {"clientOrderId", record.value().client_order_id},
                         {"exchangeOrderId", record.value().exchange_order_id},
                         {"symbol", record.value().symbol},
+                        {"venue", record.value().venue},
                         {"state", to_string(record.value().state)}};
                     return json_response(200, response);
                 } catch (...) {
