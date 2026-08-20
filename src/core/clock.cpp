@@ -30,4 +30,14 @@ auto utc_now_iso_ms() -> std::string
     return out;
 }
 
+auto utc_now_epoch_ms() -> std::string
+{
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count() % 1000;
+    char frac[8];
+    std::snprintf(frac, sizeof(frac), ".%03d", static_cast<int>(ms));
+    return std::to_string(secs) + frac;
+}
+
 } // namespace gateway

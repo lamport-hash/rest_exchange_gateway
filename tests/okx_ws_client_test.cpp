@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -415,6 +416,39 @@ TEST_CASE("a disabled ws config makes start a no-op")
     OkxOrdersFeed feed{config};
     feed.start();
     CHECK_FALSE(feed.is_running());
+    feed.stop();
+}
+
+TEST_CASE("ws_host_for routes demo credentials to the demo WS host")
+{
+    auto config = base_config();
+    config.demo_trading = true;
+    config.ws.host = "ws.okx.com";
+    CHECK(gateway::exchange::okx::ws_host_for(config) == "wspap.okx.com");
+
+    config.demo_trading = false;
+    CHECK(gateway::exchange::okx::ws_host_for(config) == "ws.okx.com");
+
+    config.demo_trading = true;
+    config.ws.host = "custom.host.example";
+    CHECK(gateway::exchange::okx::ws_host_for(config) == "custom.host.example");
+
+    config.ws.host = "wspap.okx.com";
+    CHECK(gateway::exchange::okx::ws_host_for(config) == "wspap.okx.com");
+}
+
+TEST_CASE("the feed logs in with an epoch timestamp, not ISO 8601")
+{
+    OkxMockWsServer server(base_config());
+    server.start();
+    OkxOrdersFeed feed{feed_config(server, base_config())};
+    feed.start();
+
+    REQUIRE(server.wait_for_subscriber(5000));
+    const auto login_timestamp = server.last_login_timestamp();
+    CAPTURE(login_timestamp);
+    CHECK(std::regex_match(login_timestamp, std::regex(R"(^\d{10}\.\d{3}$)")));
+
     feed.stop();
 }
 
