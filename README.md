@@ -74,19 +74,28 @@ delayed responses, idempotent place/cancel retries, no double-applied
 orders, WS execution reports, disconnect/reconnect, venue death/recovery):
 
 ```bash
-tests/blackbox/run_docker_client.sh          # 32 assertions, ~10 seconds
+tests/blackbox/run_docker_client.sh          # 44 assertions, ~10 seconds
 # or directly inside the dev container:
 docker compose exec dev tests/blackbox/phase2_client_tests.sh
 ```
 
-REST surface (phase 1, OKX backend):
+REST surface (phase 3: OMS-backed, OKX backend):
 
-- `POST /orders` — `{"clientOrderId","instrumentId","side":"buy|sell","type":"limit|market","price","quantity"}` → 201
-- `GET /orders/{clientOrderId}?instrumentId=BTC-USDT` → order snapshot
-- `DELETE /orders/{clientOrderId}?instrumentId=BTC-USDT` → cancel
-- `GET /health`
-- Errors: `{"error":{"code","reason","clientOrderId"}}` (400 invalid request,
-  404 not found, 409 venue rejected, 502 venue unreachable, 500 internal)
+- `POST /orders` — `{"clientOrderId","venue":"OKX","symbol":"BTC-USDT","side":"buy|sell","type":"limit|market","price","quantity","timeInForce":"GTC|IOC|FOK"}` → 201 (venue/timeInForce optional; unknown fields rejected — no exchange-specific parameters)
+- `GET /orders/{clientOrderId}` → unified order snapshot from the gateway registry (execution reports from the venue WebSocket keep it current)
+- `DELETE /orders/{clientOrderId}` → idempotent cancel
+- `PUT /orders/{clientOrderId}` — `{"price","quantity"}` (either/both) → amend
+- `GET /health` → `{"status":"ok","knownOrders",...}`
+- Errors: `{"error":{"code","reason","clientOrderId"}}` (400 invalid request
+  or `risk_*` pre-trade rejection, 404 not found, 409 venue rejected /
+  order terminal, 502 venue unreachable, 500 internal)
+- Idempotency is strict: once a clientOrderId is known, retried places
+  replay the recorded outcome (identical ack or identical rejection);
+  duplicate/out-of-order execution reports never regress state (explicit
+  transition table; filled quantity is a monotonic high-water mark)
+- State survives restarts: append-only JSONL event log (torn-tail safe) +
+  startup/reconnect reconciliation with the venue (orders-pending
+  adoption, terminal resolution, absent orders marked rejected)
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
 

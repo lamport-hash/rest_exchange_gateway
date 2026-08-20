@@ -57,7 +57,11 @@ target_link_libraries(gateway PRIVATE gateway_rest gateway_okx)
 add_library(gateway_core STATIC
     src/core/clock.cpp
     src/core/config.cpp
+    src/core/decimal.cpp
+    src/core/event_log.cpp
+    src/core/oms.cpp
     src/core/retry.cpp
+    src/core/risk.cpp
 )
 target_include_directories(gateway_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -101,6 +105,26 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(retry_test tests/retry_test.cpp)
     target_link_libraries(retry_test PRIVATE gateway_core)
     add_test(NAME retry_test COMMAND retry_test)
+
+    add_executable(decimal_test tests/decimal_test.cpp)
+    target_link_libraries(decimal_test PRIVATE gateway_core)
+    add_test(NAME decimal_test COMMAND decimal_test)
+
+    add_executable(order_state_test tests/order_state_test.cpp)
+    target_link_libraries(order_state_test PRIVATE gateway_core)
+    add_test(NAME order_state_test COMMAND order_state_test)
+
+    add_executable(event_log_test tests/event_log_test.cpp)
+    target_link_libraries(event_log_test PRIVATE gateway_core)
+    add_test(NAME event_log_test COMMAND event_log_test)
+
+    add_executable(risk_test tests/risk_test.cpp)
+    target_link_libraries(risk_test PRIVATE gateway_core)
+    add_test(NAME risk_test COMMAND risk_test)
+
+    add_executable(oms_test tests/oms_test.cpp)
+    target_link_libraries(oms_test PRIVATE gateway_core)
+    add_test(NAME oms_test COMMAND oms_test)
 
     add_executable(clock_test tests/clock_test.cpp)
     target_link_libraries(clock_test PRIVATE gateway_core)

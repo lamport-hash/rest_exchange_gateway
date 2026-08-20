@@ -115,6 +115,7 @@ auto info(const std::string& a_state, const std::string& a_px = "50000",
 {
     return OkxOrderInfo{.ord_id = "ord-1",
                         .cl_ord_id = "gw1",
+                        .inst_id = "BTC-USDT",
                         .state = a_state,
                         .side = "buy",
                         .ord_type = "limit",
@@ -131,7 +132,8 @@ auto place_request() -> OkxPlaceRequest
                            .side = "buy",
                            .ord_type = "limit",
                            .px = "50000",
-                           .sz = "1"};
+                           .sz = "1",
+                           .td_if = ""};
 }
 
 auto found(const OkxOrderInfo& a_info) -> gateway::Result<std::optional<OkxOrderInfo>>

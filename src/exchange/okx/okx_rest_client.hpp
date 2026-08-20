@@ -77,6 +77,10 @@ class OkxRestClient
     [[nodiscard]] auto
     get_order(const OkxQuery& a_query) const -> Result<std::optional<OkxOrderInfo>>;
 
+    /// GET /api/v5/trade/orders-pending: every currently open order
+    /// (single page; OKX returns up to 100 — documented limitation).
+    [[nodiscard]] auto get_orders_pending() const -> Result<std::vector<OkxOrderInfo>>;
+
   private:
     [[nodiscard]] auto signed_request(const char* a_method, const std::string& a_path,
                                       const std::string& a_body) const -> Result<nlohmann::json>;

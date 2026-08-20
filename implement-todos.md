@@ -80,22 +80,61 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       HTTP; 32 assertions green)
 
 ## Phase 3 — Order state machine, OMS, recovery, full REST surface
-- [ ] 3.1 Normalized OrderState machine (Live, PartiallyFilled, Filled,
+- [x] 3.1 Normalized OrderState machine (Live, PartiallyFilled, Filled,
       Canceled, Rejected) with explicit OKX mapping table; illegal transitions
       rejected; exhaustive unit tests
-- [ ] 3.2 OMS registry: clientOrderId→exchangeOrderId map, duplicate-report
+      (src/core/order_state.hpp: explicit 9-entry transition table +
+      is_terminal/can_transition/apply_transition; OKX mapping in
+      okx_wire.cpp map_okx_state/map_okx_side + connector snapshot mapping;
+      order_state_test verifies the full 5x5 matrix)
+- [x] 3.2 OMS registry: clientOrderId→exchangeOrderId map, duplicate-report
       dedup, out-of-order arbitration, REST-vs-WS race handling
-- [ ] 3.3 Append-only persistence log + startup replay (truncated-tail safety)
-- [ ] 3.4 Startup reconciliation with OKX open orders (orders-pending);
+      (src/core/oms.{hpp,cpp}: single-mutex registry; duplicate/stale/racing
+      observations discarded by the state machine while filled quantity
+      stays a monotonic high-water mark; reports_applied/stale/unknown
+      stats; strict gateway-level idempotency — a known clientOrderId
+      replays its recorded outcome (ack or rejection) without venue calls;
+      venue-rejected and risk-rejected places are recorded as terminal
+      Rejected and replay deterministically; transport-unresolved places
+      record nothing and let the venue-side engine resolve retries)
+- [x] 3.3 Append-only persistence log + startup replay (truncated-tail safety)
+      (src/core/event_log.{hpp,cpp}: JSONL, flush on append; replay drops an
+      unterminated tail and truncates the file back to the last complete
+      event, while mid-file corruption fails startup; OMS persists
+      place_accepted/adopted/rejected/amended/state events and rebuilds the
+      registry on load_from_log)
+- [x] 3.4 Startup reconciliation with OKX open orders (orders-pending);
       restart-with-live-orders drill
-- [ ] 3.5 Pre-trade risk checks: max qty per instrument, max notional,
+      (ExchangeConnector::get_open_orders() + orders-pending REST endpoint;
+      reconcile() adopts venue-live orders missing locally, refreshes fills,
+      resolves non-terminal entries; venue-absent → terminal Rejected
+      (venue_absent), unreachable → kept Live + warned; reconciliation also
+      runs on every WS reconnect via set_connectivity_handler; drills in
+      oms_test, rest_api_test and blackbox point 14)
+- [x] 3.5 Pre-trade risk checks: max qty per instrument, max notional,
       approximate position limit; clear reject reasons to the client
-- [ ] 3.6 Complete client-facing REST API: PUT /orders/{id} (amend),
+      (src/core/risk.{hpp,cpp} + src/core/decimal.{hpp,cpp} exact scaled
+      arithmetic; risk config {"default","instruments"} in gateway config;
+      worst-case projection = executed fills + outstanding of working
+      orders + candidate, signed by side (hedges net out); notional skipped
+      for market orders (no price feed) — documented; REST rejects with 400
+      + machine-readable risk_* codes (Crow v1.2.0 cannot emit 422); amend
+      re-runs the checks against the amended quantity)
+- [x] 3.6 Complete client-facing REST API: PUT /orders/{id} (amend),
       GET /health, full error schema {error:{code,reason,clientOrderId}};
       reject exchange-specific fields; integration tests (ephemeral-port Crow
       driven by cpp-httplib)
+      (spec schema: symbol + optional venue ("OKX" only until phase 4) +
+      optional timeInForce GTC/IOC/FOK → OKX tdIf (limit orders only);
+      strict field allowlist on POST and PUT; GET served from the OMS
+      registry (WS-fed), DELETE idempotent, PUT amend; /health carries
+      registry stats; blackbox suite extended to 44 assertions incl. amend,
+      risk rejection and a kill/restart recovery drill)
       Acceptance: restart/reconcile drills pass on mock; state-machine tests
       exhaustive; both presets green
+      (2026-08-20: pass — ctest debug (ASan+UBSan) and release 17/17
+      (decimal, order_state, event_log, risk, oms + updated okx/rest
+      suites); black-box client suite 44/44)
 
 ## Phase 4 — Second exchange (Binance WS) + truly agnostic gateway
 - [ ] 4.1 Mock Binance (in-process, from official docs): WS-API order.place /

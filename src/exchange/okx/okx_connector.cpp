@@ -25,18 +25,43 @@ auto to_wire(const OrderRequest& a_request) -> OkxPlaceRequest
                            .side = a_request.side == Side::Buy ? "buy" : "sell",
                            .ord_type = a_request.type == OrderType::Limit ? "limit" : "market",
                            .px = a_request.price,
-                           .sz = a_request.quantity};
+                           .sz = a_request.quantity,
+                           .td_if = a_request.time_in_force};
 }
 
+auto map_ord_type(std::string_view a_type) -> std::optional<OrderType>
+{
+    if (a_type == "limit") {
+        return OrderType::Limit;
+    }
+    if (a_type == "market") {
+        return OrderType::Market;
+    }
+    return std::nullopt;
+}
+
+/// Full snapshot normalization; fails closed on unknown state/side/type so
+/// corrupt venue data is surfaced instead of guessed.
 auto to_snapshot(const OkxOrderInfo& a_info) -> Result<OrderSnapshot>
 {
     const auto state = map_okx_state(a_info.state);
+    const auto side = map_okx_side(a_info.side);
+    const auto type = map_ord_type(a_info.ord_type);
     if (!state.has_value()) {
         return Error{"protocol", "unknown OKX order state: " + a_info.state};
     }
+    if (!side.has_value()) {
+        return Error{"protocol", "unknown OKX order side: " + a_info.side};
+    }
+    if (!type.has_value()) {
+        return Error{"protocol", "unknown OKX order type: " + a_info.ord_type};
+    }
     return OrderSnapshot{.client_order_id = a_info.cl_ord_id,
                          .exchange_order_id = a_info.ord_id,
+                         .instrument_id = a_info.inst_id,
                          .state = *state,
+                         .side = *side,
+                         .type = *type,
                          .price = a_info.px,
                          .quantity = a_info.sz,
                          .filled_quantity = a_info.acc_fill_sz,
@@ -115,11 +140,55 @@ auto OkxConnector::get_order(const OrderQuery& a_query) -> Result<std::optional<
         [](const Error& a_error) { return a_error.code == "transport"; });
 }
 
+auto OkxConnector::get_open_orders() -> Result<std::vector<OrderSnapshot>>
+{
+    const auto attempt = [this]() -> Result<std::vector<OkxOrderInfo>> {
+        return client_.get_orders_pending();
+    };
+    auto pending = with_retries<std::vector<OkxOrderInfo>>(
+        config_.retry, retry_clock_, attempt,
+        [](const Error& a_error) { return a_error.code == "transport"; });
+    if (!pending.is_ok()) {
+        return pending.error();
+    }
+
+    // Items the gateway cannot represent (unexpected state/side/type) are
+    // skipped: reconciliation is best effort and must not fail because of
+    // one exotic venue order.
+    std::vector<OrderSnapshot> snapshots;
+    snapshots.reserve(pending.value().size());
+    for (const auto& info : pending.value()) {
+        auto snapshot = to_snapshot(info);
+        if (snapshot.is_ok()) {
+            snapshots.push_back(std::move(snapshot.value()));
+        }
+    }
+    return snapshots;
+}
+
 void OkxConnector::set_execution_report_handler(
     std::function<void(const ExecutionReport&)> a_handler)
 {
     const std::lock_guard lock(handler_mutex_);
     execution_report_handler_ = std::move(a_handler);
+}
+
+void OkxConnector::set_connectivity_handler(std::function<void(bool)> a_handler)
+{
+    const std::lock_guard lock(handler_mutex_);
+    connectivity_handler_ = std::move(a_handler);
+}
+
+void OkxConnector::forward_connectivity(bool a_connected)
+{
+    std::function<void(bool)> handler;
+    {
+        const std::lock_guard lock(handler_mutex_);
+        handler = connectivity_handler_;
+    }
+    if (handler) {
+        handler(a_connected);
+    }
 }
 
 void OkxConnector::forward_report(const ExecutionReport& a_report)
@@ -141,6 +210,20 @@ void OkxConnector::start()
     }
     auto feed = std::make_unique<OkxOrdersFeed>(config_, timestamp_provider_);
     feed->set_report_handler([this](const ExecutionReport& a_report) { forward_report(a_report); });
+    feed->set_event_handler([this](const FeedEvent& a_event) {
+        switch (a_event.type) {
+        case FeedEventType::Connected:
+            forward_connectivity(true);
+            break;
+        case FeedEventType::Disconnected:
+        case FeedEventType::Stopped:
+            forward_connectivity(false);
+            break;
+        case FeedEventType::Connecting:
+        case FeedEventType::ProtocolWarning:
+            break;
+        }
+    });
     feed->start();
     feed_ = std::move(feed);
 }
@@ -150,6 +233,7 @@ void OkxConnector::stop()
     if (feed_) {
         feed_->stop();
         feed_.reset();
+        forward_connectivity(false);
     }
 }
 

@@ -48,6 +48,48 @@ TEST_CASE("load_config accepts a full valid config")
     CHECK(result.value().okx.at("apiKey") == "k");
 }
 
+TEST_CASE("load_config parses persistence and risk sections")
+{
+    const TempConfigFile file{R"({
+        "persistence": {"logPath": "data/orders.jsonl"},
+        "risk": {
+            "default": {"maxQty": "10", "maxNotional": "1000000", "maxPosition": "5"},
+            "instruments": {"BTC-USDT": {"maxQty": "1"}}
+        }
+    })"};
+    const auto result = gateway::load_config(file.path());
+    REQUIRE(result.is_ok());
+    REQUIRE(result.value().persistence_log.has_value());
+    CHECK(result.value().persistence_log->string() == "data/orders.jsonl");
+    const auto limits = result.value().risk.limits_for("BTC-USDT");
+    REQUIRE(limits.has_value());
+    CHECK(limits->max_qty == "1");
+    CHECK(result.value().risk.limits_for("ETH-USDT")->max_qty == "10");
+}
+
+TEST_CASE("load_config rejects malformed persistence and risk sections")
+{
+    const TempConfigFile bad_persistence{R"({"persistence": {"logPath": 5}})"};
+    CHECK_FALSE(gateway::load_config(bad_persistence.path()).is_ok());
+
+    const TempConfigFile missing_path{R"({"persistence": {}})"};
+    CHECK_FALSE(gateway::load_config(missing_path.path()).is_ok());
+
+    const TempConfigFile bad_risk{R"({"risk": {"default": {"maxQty": "soon"}}})"};
+    const auto result = gateway::load_config(bad_risk.path());
+    REQUIRE_FALSE(result.is_ok());
+    CHECK(result.error().code == "protocol");
+}
+
+TEST_CASE("a config without persistence or risk keeps them disabled/unlimited")
+{
+    const TempConfigFile file{R"({"okx": {}})"};
+    const auto result = gateway::load_config(file.path());
+    REQUIRE(result.is_ok());
+    CHECK_FALSE(result.value().persistence_log.has_value());
+    CHECK_FALSE(result.value().risk.limits_for("BTC-USDT").has_value());
+}
+
 TEST_CASE("load_config applies defaults for a minimal config")
 {
     const TempConfigFile file{R"({"okx": {}})"};

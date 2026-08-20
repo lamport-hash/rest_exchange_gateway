@@ -115,8 +115,12 @@ gw() { # METHOD path [json-body] -> sets STATUS and BODY
 json_field() { # body field -> value of "field":"value"
     printf '%s' "$1" | grep -o "\"$2\":\"[^\"]*\"" | head -1 | cut -d'"' -f4
 }
-place_body() { # clientOrderId -> request JSON
-    printf '{"clientOrderId":"%s","instrumentId":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"}' "$1"
+place_body() { # clientOrderId [quantity] -> request JSON
+    if [ $# -gt 1 ]; then
+        printf '{"clientOrderId":"%s","venue":"OKX","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"%s"}' "$1" "$2"
+    else
+        printf '{"clientOrderId":"%s","venue":"OKX","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"}' "$1"
+    fi
 }
 
 # ---- build (if needed) ----------------------------------------------------
@@ -152,6 +156,8 @@ echo "   venue rest_port=$REST_PORT ws_port=$WS_PORT"
 cat >"$WORK/gateway.json" <<EOF
 {
     "rest": {"port": $GW_PORT},
+    "persistence": {"logPath": "$WORK/orders.jsonl"},
+    "risk": {"instruments": {"BTC-USDT": {"maxQty": "0.01", "maxNotional": "100000"}}},
     "okx": {
         "apiKey": "blackbox-key",
         "secretKey": "blackbox-secret",
@@ -191,22 +197,23 @@ echo "== 2. place and fetch an order =="
 gw POST /orders "$(place_body gwT02)"
 assert_eq "POST /orders -> 201" "201" "$STATUS"
 assert_eq "exchangeOrderId assigned" "mock-1" "$(json_field "$BODY" exchangeOrderId)"
-gw GET "/orders/gwT02?instrumentId=BTC-USDT"
+gw GET "/orders/gwT02"
 assert_eq "GET /orders/gwT02 -> 200" "200" "$STATUS"
 assert_eq "state is live" "live" "$(json_field "$BODY" state)"
 
 # ---- 3. idempotent client retry ------------------------------------------
-echo "== 3. same clientOrderId twice -> same outcome =="
+echo "== 3. same clientOrderId twice -> same outcome (strict idempotency) =="
 P0="$(stat_of rest_place)"
 G0="$(stat_of rest_get)"
 gw POST /orders "$(place_body gwT03)"
 assert_eq "first place -> 201" "201" "$STATUS"
 ORD1="$(json_field "$BODY" exchangeOrderId)"
 gw POST /orders "$(place_body gwT03)"
-assert_eq "retry place -> 201 (not 409)" "201" "$STATUS"
+assert_eq "retry place -> 201 (replayed)" "201" "$STATUS"
+assert_eq "replayed flag set" "true" "$(printf '%s' "$BODY" | grep -o '"replayed":[a-z]*' | cut -d: -f2)"
 assert_eq "same exchangeOrderId" "$ORD1" "$(json_field "$BODY" exchangeOrderId)"
-assert_eq "venue saw exactly 2 places" "$((P0 + 2))" "$(stat_of rest_place)"
-assert_eq "venue saw exactly 1 resolving lookup" "$((G0 + 1))" "$(stat_of rest_get)"
+assert_eq "venue saw exactly 1 place" "$((P0 + 1))" "$(stat_of rest_place)"
+assert_eq "venue saw no resolving lookup" "$G0" "$(stat_of rest_get)"
 
 # ---- 4. place processed, acknowledgement dropped --------------------------
 echo "== 4. place ack dropped -> lookup resolution, no re-send =="
@@ -217,7 +224,7 @@ gw POST /orders "$(place_body gwT04)"
 assert_eq "place -> 201 despite dropped ack" "201" "$STATUS"
 assert_eq "no re-send (place count +1 only)" "$((P0 + 1))" "$(stat_of rest_place)"
 assert_eq "resolved via one lookup" "$((G0 + 1))" "$(stat_of rest_get)"
-gw GET "/orders/gwT04?instrumentId=BTC-USDT"
+gw GET "/orders/gwT04"
 assert_eq "exactly one live order at the venue" "live" "$(json_field "$BODY" state)"
 
 # ---- 5. place dropped entirely -------------------------------------------
@@ -227,7 +234,7 @@ control /fault/drop-next-request >/dev/null
 gw POST /orders "$(place_body gwT05)"
 assert_eq "place -> 201 after retry" "201" "$STATUS"
 assert_eq "re-sent once (place count +2)" "$((P0 + 2))" "$(stat_of rest_place)"
-gw GET "/orders/gwT05?instrumentId=BTC-USDT"
+gw GET "/orders/gwT05"
 assert_eq "order is live" "live" "$(json_field "$BODY" state)"
 
 # ---- 6. response slower than the read timeout -----------------------------
@@ -235,30 +242,30 @@ echo "== 6. delayed venue response -> timeout -> retry =="
 control /fault/delay-next '{"ms":800}' >/dev/null # > 400ms read timeout
 gw POST /orders "$(place_body gwT06)"
 assert_eq "place -> 201 via retry" "201" "$STATUS"
-gw GET "/orders/gwT06?instrumentId=BTC-USDT"
+gw GET "/orders/gwT06"
 assert_eq "order is live" "live" "$(json_field "$BODY" state)"
 
 # ---- 7. idempotent cancel --------------------------------------------------
 echo "== 7. cancel twice -> both succeed =="
-gw DELETE "/orders/gwT02?instrumentId=BTC-USDT"
+gw DELETE "/orders/gwT02"
 assert_eq "first cancel -> 200" "200" "$STATUS"
-gw DELETE "/orders/gwT02?instrumentId=BTC-USDT"
+gw DELETE "/orders/gwT02"
 assert_eq "second cancel -> 200 (idempotent)" "200" "$STATUS"
-gw GET "/orders/gwT02?instrumentId=BTC-USDT"
+gw GET "/orders/gwT02"
 assert_eq "order canceled at the venue" "canceled" "$(json_field "$BODY" state)"
 
 # ---- 8. cancel processed, ack dropped -------------------------------------
 echo "== 8. cancel ack dropped -> no re-send =="
 C0="$(stat_of rest_cancel)"
 control /fault/drop-next-response >/dev/null
-gw DELETE "/orders/gwT03?instrumentId=BTC-USDT"
+gw DELETE "/orders/gwT03"
 assert_eq "cancel -> 200 despite dropped ack" "200" "$STATUS"
 assert_eq "no re-send (cancel count +1 only)" "$((C0 + 1))" "$(stat_of rest_cancel)"
 
 # ---- 9. WS execution reports ----------------------------------------------
 echo "== 9. WS orders channel -> execution reports logged =="
 wait_stat ws_subscribed -ge 1 10 || bad "gateway never subscribed to the orders channel"
-control /ws/push '{"instId":"BTC-USDT","ordId":"mock-3","clOrdId":"gwT04","state":"partially_filled","px":"50000","sz":"0.001","accFillSz":"0.0005","avgPx":"50000"}' >/dev/null
+control /ws/push '{"instId":"BTC-USDT","ordId":"mock-3","clOrdId":"gwT04","state":"partially_filled","side":"buy","px":"50000","sz":"0.001","accFillSz":"0.0005","avgPx":"50000"}' >/dev/null
 if wait_log '"clientOrderId":"gwT04".*"state":"partially_filled"' 10; then
     ok "execution report (partially_filled) reached the gateway log"
 else
@@ -276,7 +283,7 @@ if wait_stat ws_connections -ge "$((CONNS0 + 1))" 10 &&
 else
     bad "feed did not reconnect after kill"
 fi
-control /ws/push '{"instId":"BTC-USDT","ordId":"mock-3","clOrdId":"gwT04","state":"filled","px":"50000","sz":"0.001","accFillSz":"0.001","avgPx":"50000"}' >/dev/null
+control /ws/push '{"instId":"BTC-USDT","ordId":"mock-3","clOrdId":"gwT04","state":"filled","side":"buy","px":"50000","sz":"0.001","accFillSz":"0.001","avgPx":"50000"}' >/dev/null
 if wait_log '"clientOrderId":"gwT04".*"state":"filled"' 10; then
     ok "updates flow again after reconnect"
 else
@@ -292,8 +299,43 @@ assert_contains "structured error" "$BODY" '"code":"venue_unavailable"'
 control /rest/start >/dev/null
 gw POST /orders "$(place_body gwT11)"
 assert_eq "place -> 201 after venue recovery" "201" "$STATUS"
-gw GET "/orders/gwT11?instrumentId=BTC-USDT"
+gw GET "/orders/gwT11"
 assert_eq "order is live after recovery" "live" "$(json_field "$BODY" state)"
+
+# ---- 12. amend via PUT -------------------------------------------------------
+echo "== 12. amend an order (PUT /orders/{id}) =="
+gw PUT /orders/gwT05 '{"price":"49000","quantity":"0.002"}'
+assert_eq "PUT /orders/gwT05 -> 200" "200" "$STATUS"
+assert_eq "amended price visible" "49000" "$(json_field "$BODY" price)"
+gw GET /orders/gwT05
+assert_eq "GET after amend shows new price" "49000" "$(json_field "$BODY" price)"
+
+# ---- 13. pre-trade risk ------------------------------------------------------
+echo "== 13. risk rejects oversized orders without touching the venue =="
+P0="$(stat_of rest_place)"
+gw POST /orders "$(place_body gwT13 0.1)"
+assert_eq "oversized place -> 400" "400" "$STATUS"
+assert_contains "risk reject code" "$BODY" '"code":"risk_max_qty"'
+assert_eq "venue untouched" "$P0" "$(stat_of rest_place)"
+
+# ---- 14. restart recovery ----------------------------------------------------
+echo "== 14. gateway restart -> replay + reconcile =="
+P0="$(stat_of rest_place)"
+kill "$GATEWAY_PID" 2>/dev/null
+wait "$GATEWAY_PID" 2>/dev/null
+"$GATEWAY_BIN" "$WORK/gateway.json" >>"$WORK/gateway.log" 2>&1 &
+GATEWAY_PID=$!
+for _ in $(seq 1 100); do
+    gw GET /health && [ "$STATUS" = "200" ] && break
+    sleep 0.1
+done
+gw GET /orders/gwT05
+assert_eq "GET /orders/gwT05 -> 200 after restart" "200" "$STATUS"
+assert_eq "order state survives restart" "live" "$(json_field "$BODY" state)"
+assert_eq "amended price survived restart" "49000" "$(json_field "$BODY" price)"
+gw POST /orders "$(place_body gwT05)"
+assert_eq "place replay after restart -> 201" "201" "$STATUS"
+assert_eq "venue saw no extra place" "$P0" "$(stat_of rest_place)"
 
 # ---- summary ----------------------------------------------------------------
 echo

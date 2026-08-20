@@ -35,6 +35,17 @@ auto map_okx_state(std::string_view a_state) -> std::optional<OrderState>
     return std::nullopt;
 }
 
+auto map_okx_side(std::string_view a_side) -> std::optional<Side>
+{
+    if (a_side == "buy") {
+        return Side::Buy;
+    }
+    if (a_side == "sell") {
+        return Side::Sell;
+    }
+    return std::nullopt;
+}
+
 auto to_json(const OkxPlaceRequest& a_request) -> nlohmann::json
 {
     nlohmann::json body = {{"clOrdId", a_request.cl_ord_id},
@@ -46,6 +57,9 @@ auto to_json(const OkxPlaceRequest& a_request) -> nlohmann::json
                            {"sz", a_request.sz}};
     if (a_request.px.empty()) {
         body.erase("px");
+    }
+    if (!a_request.td_if.empty()) {
+        body["tdIf"] = a_request.td_if;
     }
     return body;
 }
@@ -87,6 +101,7 @@ auto parse_order_info(const nlohmann::json& a_item) -> OkxOrderInfo
 {
     return {.ord_id = field_string(a_item, "ordId"),
             .cl_ord_id = field_string(a_item, "clOrdId"),
+            .inst_id = field_string(a_item, "instId"),
             .state = field_string(a_item, "state"),
             .side = field_string(a_item, "side"),
             .ord_type = field_string(a_item, "ordType"),

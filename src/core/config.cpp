@@ -39,6 +39,24 @@ auto load_config(const std::filesystem::path& a_path) -> Result<GatewayConfig>
         config.rest_port = static_cast<std::uint16_t>(port);
     }
 
+    if (root.contains("persistence")) {
+        const auto& persistence = root.at("persistence");
+        if (!persistence.is_object() || !persistence.contains("logPath") ||
+            !persistence.at("logPath").is_string()) {
+            return Error{"protocol",
+                         "persistence section must be an object with string \"logPath\""};
+        }
+        config.persistence_log = persistence.at("logPath").get<std::string>();
+    }
+
+    if (root.contains("risk")) {
+        const auto risk = risk_config_from_json(root.at("risk"));
+        if (!risk.is_ok()) {
+            return risk.error();
+        }
+        config.risk = risk.value();
+    }
+
     if (root.contains("okx")) {
         if (!root.at("okx").is_object()) {
             return Error{"protocol", "okx section must be a JSON object"};

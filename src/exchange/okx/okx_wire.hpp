@@ -17,6 +17,8 @@ struct OkxPlaceRequest
     std::string ord_type;
     std::string px;
     std::string sz;
+    /// Optional time in force ("GTC"/"IOC"/"FOK"); empty = venue default.
+    std::string td_if;
     std::string td_mode = "cash";
 };
 
@@ -52,6 +54,7 @@ struct OkxOrderInfo
 {
     std::string ord_id;
     std::string cl_ord_id;
+    std::string inst_id;
     std::string state;
     std::string side;
     std::string ord_type;
@@ -90,5 +93,9 @@ struct OkxOrderInfo
 /// "canceled") to the normalized OrderState. Returns std::nullopt for
 /// unknown/unsupported states. Shared by the REST codec and the WS feed.
 [[nodiscard]] auto map_okx_state(std::string_view a_state) -> std::optional<OrderState>;
+
+/// Map an OKX side string ("buy"/"sell") to the normalized Side.
+/// std::nullopt for anything else. Shared by the REST codec and the WS feed.
+[[nodiscard]] auto map_okx_side(std::string_view a_side) -> std::optional<Side>;
 
 } // namespace gateway::exchange::okx
