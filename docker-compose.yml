@@ -1,0 +1,15 @@
+services:
+  dev:
+    build:
+      context: .
+    image: rest-exchange-gateway/dev:latest
+    init: true
+    command: ["sleep", "infinity"]
+    volumes:
+      - .:/workspace/rest_exchange_gateway
+      - build:/workspace/rest_exchange_gateway/build
+      - ccache:/ccache
+
+volumes:
+  build:
+  ccache:
