@@ -73,6 +73,11 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       Acceptance: connectivity failures → gateway recovers, no lost or
       double-applied orders; both presets green
       (2026-08-20: pass — ctest debug (ASan+UBSan) and release 12/12)
+      (2026-08-20: black-box client suite added — tests/blackbox/
+      run_docker_client.sh launches a one-shot docker client container that
+      starts mock_okx_env (standalone fake venue: REST+WS+fault control
+      plane) + the real gateway binary and asserts all phase-2 points over
+      HTTP; 32 assertions green)
 
 ## Phase 3 — Order state machine, OMS, recovery, full REST surface
 - [ ] 3.1 Normalized OrderState machine (Live, PartiallyFilled, Filled,

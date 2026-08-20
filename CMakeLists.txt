@@ -137,4 +137,9 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(rest_api_test tests/rest_api_test.cpp)
     target_link_libraries(rest_api_test PRIVATE gateway_test_support gateway_rest)
     add_test(NAME rest_api_test COMMAND rest_api_test)
+
+    # Standalone fake OKX venue (REST + WS + HTTP control plane) driven by
+    # tests/blackbox/phase2_client_tests.sh; not a ctest case itself.
+    add_executable(mock_okx_env tests/blackbox/mock_okx_env.cpp)
+    target_link_libraries(mock_okx_env PRIVATE gateway_test_support)
 endif()

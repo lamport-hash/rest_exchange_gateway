@@ -40,7 +40,7 @@ auto main(int a_argc, char* a_argv[]) -> int
                                      {"state", gateway::to_string(a_report.state)},
                                      {"filledQuantity", a_report.filled_quantity},
                                      {"averageFillPrice", a_report.average_fill_price}};
-        std::cout << line.dump() << '\n';
+        std::cout << line.dump() << '\n' << std::flush;
     });
 
     crow::SimpleApp app;
@@ -56,7 +56,8 @@ auto main(int a_argc, char* a_argv[]) -> int
     connector.start();
     std::cout << std::format("rest_exchange_gateway listening on port {} (okx feed {})\n",
                              config.value().rest_port,
-                             venue_config.ws.enabled ? "enabled" : "disabled");
+                             venue_config.ws.enabled ? "enabled" : "disabled")
+              << std::flush;
     app.port(config.value().rest_port).concurrency(2).loglevel(crow::LogLevel::Warning).run();
 
     connector.stop();

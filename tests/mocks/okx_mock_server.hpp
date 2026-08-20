@@ -5,11 +5,13 @@
 #include <httplib.h>
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace gateway::testing {
 
@@ -52,6 +54,9 @@ class OkxMockServer
 
     void start();
     void stop();
+    /// stop() + start() binding the SAME port (simulates the venue dying
+    /// abruptly and coming back; clients see connection failures in between).
+    void restart_on_same_port();
     [[nodiscard]] auto port() const -> std::uint16_t;
 
     /// Scripting API (thread-safe).
@@ -93,7 +98,7 @@ class OkxMockServer
         long long quote_scaled = 0;
     };
 
-    void register_routes();
+    void register_routes(httplib::Server& a_server);
 
     /// Record the request and apply one-shot fault scripting (raw response /
     /// drop / delay). Returns true when the response has already been set
@@ -120,7 +125,7 @@ class OkxMockServer
     std::vector<RecordedRequest> recorded_;
     long long ord_counter_ = 0;
     mutable std::mutex mutex_;
-    httplib::Server server_;
+    std::unique_ptr<httplib::Server> server_;
     std::thread server_thread_;
     int port_ = 0;
     bool running_ = false;
