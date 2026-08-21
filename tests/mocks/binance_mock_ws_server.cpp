@@ -262,6 +262,16 @@ void BinanceMockWsServer::push_execution_report(const std::string& a_client_orde
     duplicate_next_update_ = false;
 }
 
+void BinanceMockWsServer::push_raw_frame(const std::string& a_frame)
+{
+    const std::lock_guard lock(mutex_);
+    for (Session* session : sessions_) {
+        if (session->subscribed && session->socket != nullptr) {
+            session->socket->send(a_frame);
+        }
+    }
+}
+
 void BinanceMockWsServer::kill_connections()
 {
     const std::lock_guard lock(mutex_);

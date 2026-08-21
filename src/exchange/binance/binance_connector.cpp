@@ -1,5 +1,6 @@
 #include "exchange/binance/binance_connector.hpp"
 
+#include <iostream>
 #include <utility>
 
 namespace gateway::exchange::binance {
@@ -68,7 +69,9 @@ auto BinanceConnector::place_order(const OrderRequest& a_request) -> Result<Orde
                                    .type = a_request.type,
                                    .price = a_request.price,
                                    .quantity = a_request.quantity,
-                                   .time_in_force = a_request.time_in_force};
+                                   .time_in_force = a_request.time_in_force.empty()
+                                                        ? std::string{"GTC"}
+                                                        : a_request.time_in_force};
     const auto ack = binance_resilient_place(api_, wire, config_.retry, retry_clock_);
     if (!ack.is_ok()) {
         return ack.error();
@@ -214,7 +217,11 @@ void BinanceConnector::start()
             forward_connectivity(false);
             break;
         case BinanceFeedEventType::Connecting:
+            break;
         case BinanceFeedEventType::ProtocolWarning:
+            // venue frames this gateway cannot normalize must be visible
+            // in operations, not silently dropped
+            std::cerr << "binance feed warning: " << a_event.detail << '\n';
             break;
         }
     });

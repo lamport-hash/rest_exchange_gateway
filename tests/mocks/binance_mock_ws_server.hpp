@@ -82,6 +82,9 @@ class BinanceMockWsServer
     /// Push one executionReport event for a_client_order_id to every
     /// subscribed session.
     void push_execution_report(const std::string& a_client_order_id);
+    /// Push a raw JSON frame to every subscribed session (handcrafted
+    /// venue events for parser tests).
+    void push_raw_frame(const std::string& a_frame);
     /// Close every session with a clean WS close frame.
     void kill_connections();
 

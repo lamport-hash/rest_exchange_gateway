@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <random>
 #include <utility>
 
@@ -72,13 +73,37 @@ void BinanceWsClient::set_report_handler(ReportHandler a_handler)
 
 void BinanceWsClient::set_event_handler(EventHandler a_handler)
 {
+    const std::lock_guard lock(event_mutex_);
     event_handler_ = std::move(a_handler);
 }
 
-void BinanceWsClient::emit(BinanceFeedEventType a_type, std::string a_detail) const
+void BinanceWsClient::emit(BinanceFeedEventType a_type, std::string a_detail)
 {
-    if (event_handler_) {
-        event_handler_(BinanceFeedEvent{a_type, std::move(a_detail)});
+    {
+        const std::lock_guard lock(event_mutex_);
+        event_queue_.push_back(BinanceFeedEvent{a_type, std::move(a_detail)});
+    }
+    event_cv_.notify_all();
+}
+
+void BinanceWsClient::pump_events(std::stop_token a_stop)
+{
+    std::unique_lock lock(event_mutex_);
+    while (true) {
+        event_cv_.wait(lock, [&] { return a_stop.stop_requested() || !event_queue_.empty(); });
+        while (!event_queue_.empty()) {
+            BinanceFeedEvent event = std::move(event_queue_.front());
+            event_queue_.pop_front();
+            EventHandler handler = event_handler_; // copy: handlers may be reset mid-delivery
+            lock.unlock();
+            if (handler) {
+                handler(event);
+            }
+            lock.lock();
+        }
+        if (a_stop.stop_requested()) {
+            break;
+        }
     }
 }
 
@@ -88,6 +113,7 @@ void BinanceWsClient::start()
     if (already) {
         return;
     }
+    event_notifier_ = std::jthread([this](std::stop_token stop) { pump_events(std::move(stop)); });
     supervisor_ = std::jthread([this](std::stop_token stop) { run(std::move(stop)); });
 }
 
@@ -102,6 +128,16 @@ void BinanceWsClient::stop()
             }
         }
         supervisor_.join();
+    }
+    // join the notifier last so it drains every event the supervisor
+    // emitted during shutdown (including the final Stopped)
+    if (event_notifier_.joinable()) {
+        event_notifier_.request_stop();
+        {
+            const std::lock_guard lock(event_mutex_);
+            event_cv_.notify_all();
+        }
+        event_notifier_.join();
     }
     running_ = false;
     fail_all_pending();
@@ -237,7 +273,17 @@ void BinanceWsClient::handle_user_event(const nlohmann::json& a_event)
         // legitimate events this gateway does not consume.
         return;
     }
-    const std::string client_order_id = a_event.value("c", std::string{});
+    // "c" carries the clientOrderId of the CURRENT action: for cancels
+    // (and cancelReplace's canceled leg) the venue puts its auto-generated
+    // cancel id there and the ORIGINAL clientOrderId in "C" — prefer it so
+    // reports stay keyed by the gateway's clientOrderId.
+    std::string client_order_id = a_event.value("C", std::string{});
+    if (client_order_id.empty()) {
+        client_order_id = a_event.value("c", std::string{});
+    }
+    if (getenv("GATEWAY_BINANCE_DUMP_EVENTS") != nullptr) {
+        std::cerr << "[binance-raw-event] " << a_event.dump() << '\n';
+    }
     if (client_order_id.empty()) {
         emit(BinanceFeedEventType::ProtocolWarning, "executionReport without clientOrderId");
         return;

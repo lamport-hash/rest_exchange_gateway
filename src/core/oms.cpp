@@ -2,6 +2,7 @@
 
 #include "core/decimal.hpp"
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -114,7 +115,9 @@ auto amended_event(const OrderRecord& a_record) -> nlohmann::json
     return {{"type", "amended"},
             {"clientOrderId", a_record.client_order_id},
             {"price", a_record.price},
-            {"quantity", a_record.quantity}};
+            {"quantity", a_record.quantity},
+            {"state", state_to_string(a_record.state)},
+            {"exchangeOrderId", a_record.exchange_order_id}};
 }
 
 auto state_event(const OrderRecord& a_record) -> nlohmann::json
@@ -197,7 +200,9 @@ auto OrderManagementSystem::append_or_error(const nlohmann::json& a_event) -> st
 }
 
 auto OrderManagementSystem::projected_position(const std::string& a_symbol,
-                                               const OrderRecord* a_replace, Side a_candidate_side,
+                                               const OrderRecord* a_replace,
+                                               const std::string& a_exclude_id,
+                                               Side a_candidate_side,
                                                const std::string& a_candidate_qty) -> std::string
 {
     Decimal projected{};
@@ -234,6 +239,23 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
         }
     }
 
+    // other in-flight place candidates are not in the registry yet but
+    // may land as working orders; count them at full quantity
+    for (const auto& [id, flight] : in_flight_) {
+        if (id == a_exclude_id ||
+            (a_replace != nullptr && id == a_replace->client_order_id)) {
+            continue;
+        }
+        const OrderRecord& candidate = flight.candidate;
+        if (candidate.symbol != a_symbol) {
+            continue;
+        }
+        const auto quantity = parse_decimal(candidate.quantity);
+        if (quantity.is_ok()) {
+            add_in(signed_amount(candidate.side, quantity.value()));
+        }
+    }
+
     // the candidate order itself, replacing a_replace's contribution
     const auto candidate_qty = parse_decimal(a_candidate_qty);
     if (candidate_qty.is_ok()) {
@@ -251,124 +273,180 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
 auto OrderManagementSystem::place(const OrderRequest& a_request,
                                   std::string_view a_venue) -> Result<PlaceOutcome>
 {
-    const std::lock_guard lock(mutex_);
+    std::string venue{a_venue.empty() ? default_venue_ : std::string{a_venue}};
 
-    if (const auto existing = lookup(a_request.client_order_id); existing != orders_.end()) {
-        if (existing->second.rejection.has_value()) {
-            return existing->second.rejection.value();
-        }
-        return PlaceOutcome{.record = existing->second, .replayed = true};
-    }
+    ExchangeConnector* connector = nullptr;
+    { // ---- critical section 1: dedup, risk, stage the candidate ----
+        const std::lock_guard lock(mutex_);
 
-    std::string venue{a_venue.empty() ? default_venue_ : a_venue};
-    ExchangeConnector* connector = connector_for(venue);
-    if (connector == nullptr) {
-        return Error{"invalid_request",
-                     "unsupported venue \"" + venue + "\" (configured: okx, binance)"};
-    }
-
-    // ---- pre-trade risk ----
-    OrderRecord candidate{.client_order_id = a_request.client_order_id,
-                          .symbol = a_request.instrument_id,
-                          .venue = venue,
-                          .exchange_order_id = "",
-                          .side = a_request.side,
-                          .type = a_request.type,
-                          .time_in_force = a_request.time_in_force.empty()
-                                               ? std::string{"GTC"}
-                                               : a_request.time_in_force,
-                          .price = a_request.price,
-                          .quantity = a_request.quantity,
-                          .state = OrderState::Live,
-                          .filled_quantity = "0",
-                          .average_fill_price = "",
-                          .adopted = false,
-                          .rejection = std::nullopt};
-    const auto limits = risk_.limits_for(a_request.instrument_id);
-    if (limits.has_value()) {
-        const RiskOrder risk_order{.side = a_request.side,
-                                   .price = a_request.price,
-                                   .quantity = a_request.quantity,
-                                   .projected_position =
-                                       projected_position(a_request.instrument_id, nullptr,
-                                                          a_request.side, a_request.quantity)};
-        if (const auto rejection = check_risk(limits, a_request.instrument_id, risk_order)) {
-            candidate.state = OrderState::Rejected;
-            candidate.rejection = *rejection;
-            const auto persist_error = append_or_error(rejected_event(candidate));
-            orders_[candidate.client_order_id] = candidate;
-            if (persist_error.has_value()) {
-                ++stats_.log_write_failures;
-                return *persist_error;
+        if (const auto existing = lookup(a_request.client_order_id); existing != orders_.end()) {
+            if (existing->second.rejection.has_value()) {
+                return existing->second.rejection.value();
             }
-            return *rejection;
+            return PlaceOutcome{.record = existing->second, .replayed = true};
         }
+        if (const auto flying = in_flight_.find(a_request.client_order_id);
+            flying != in_flight_.end()) {
+            // a concurrent request owns the venue I/O for this id: replay
+            // the staged candidate rather than double-sending to the venue
+            return PlaceOutcome{.record = flying->second.candidate, .replayed = true};
+        }
+
+        connector = connector_for(venue);
+        if (connector == nullptr) {
+            return Error{"invalid_request",
+                         "unsupported venue \"" + venue + "\" (configured: okx, binance)"};
+        }
+
+        // ---- pre-trade risk ----
+        OrderRecord candidate{.client_order_id = a_request.client_order_id,
+                              .symbol = a_request.instrument_id,
+                              .venue = venue,
+                              .exchange_order_id = "",
+                              .side = a_request.side,
+                              .type = a_request.type,
+                              .time_in_force = a_request.time_in_force.empty()
+                                                   ? std::string{"GTC"}
+                                                   : a_request.time_in_force,
+                              .price = a_request.price,
+                              .quantity = a_request.quantity,
+                              .state = OrderState::Live,
+                              .filled_quantity = "0",
+                              .average_fill_price = "",
+                              .exchange_order_ids = {},
+                              .adopted = false,
+                              .rejection = std::nullopt};
+        const auto limits = risk_.limits_for(a_request.instrument_id);
+        if (limits.has_value()) {
+            const RiskOrder risk_order{
+                .side = a_request.side,
+                .price = a_request.price,
+                .quantity = a_request.quantity,
+                .projected_position =
+                    projected_position(a_request.instrument_id, nullptr,
+                                       a_request.client_order_id, a_request.side,
+                                       a_request.quantity)};
+            if (const auto rejection = check_risk(limits, a_request.instrument_id, risk_order)) {
+                candidate.state = OrderState::Rejected;
+                candidate.rejection = *rejection;
+                const auto persist_error = append_or_error(rejected_event(candidate));
+                orders_[candidate.client_order_id] = candidate;
+                if (persist_error.has_value()) {
+                    ++stats_.log_write_failures;
+                    return *persist_error;
+                }
+                return *rejection;
+            }
+        }
+
+        in_flight_.emplace(a_request.client_order_id,
+                           InFlightPlace{.candidate = std::move(candidate),
+                                         .buffered_reports = {}});
     }
 
-    // ---- venue routing ----
+    // ---- venue routing (NO lock: a venue feed thread applying execution
+    // reports must never wait behind venue I/O — on WS-API venues the
+    // same connection carries this very response) ----
     const auto placement = connector->place_order(a_request);
-    if (!placement.is_ok()) {
-        if (placement.error().code != "transport") {
-            // definitive venue rejection: terminal Rejected, replayed to
-            // idempotent retries
-            candidate.state = OrderState::Rejected;
-            candidate.rejection = placement.error();
-            const auto persist_error = append_or_error(rejected_event(candidate));
-            orders_[candidate.client_order_id] = candidate;
-            if (persist_error.has_value()) {
-                ++stats_.log_write_failures;
+
+    { // ---- critical section 2: record the outcome, drain raced reports ----
+        const std::lock_guard lock(mutex_);
+        const auto flying = in_flight_.find(a_request.client_order_id);
+        if (flying == in_flight_.end()) {
+            return Error{"internal", "in-flight place vanished for " +
+                                         a_request.client_order_id};
+        }
+        OrderRecord candidate = std::move(flying->second.candidate);
+        std::vector<ExecutionReport> raced = std::move(flying->second.buffered_reports);
+        in_flight_.erase(flying);
+
+        if (!placement.is_ok()) {
+            if (placement.error().code != "transport") {
+                // definitive venue rejection: terminal Rejected, replayed to
+                // idempotent retries
+                candidate.state = OrderState::Rejected;
+                candidate.rejection = placement.error();
+                const auto persist_error = append_or_error(rejected_event(candidate));
+                orders_[candidate.client_order_id] = candidate;
+                if (persist_error.has_value()) {
+                    ++stats_.log_write_failures;
+                }
+            }
+            // transport/unresolved: nothing recorded (the venue-side engine
+            // already resolved as far as it could; the client may retry)
+            return placement.error();
+        }
+
+        note_exchange_id(candidate, placement.value().exchange_order_id);
+        const auto persist_error = append_or_error(place_accepted_event(candidate));
+        orders_[candidate.client_order_id] = candidate;
+        if (persist_error.has_value()) {
+            ++stats_.log_write_failures;
+            return Error{"persistence", persist_error->message +
+                                            " (order was accepted by the venue; retry replays it)"};
+        }
+        // reports that raced the venue ack apply after the record (and its
+        // place_accepted event) exist, keeping the log replay-correct
+        for (const auto& a_report : raced) {
+            if (apply_observation(orders_[a_request.client_order_id], a_report.state,
+                                  a_report.filled_quantity, a_report.average_fill_price)) {
+                ++stats_.reports_applied;
+                append_event(state_event(orders_[a_request.client_order_id]));
             }
         }
-        return placement.error();
+        return PlaceOutcome{.record = orders_[a_request.client_order_id], .replayed = false};
     }
-
-    candidate.exchange_order_id = placement.value().exchange_order_id;
-    const auto persist_error = append_or_error(place_accepted_event(candidate));
-    orders_[candidate.client_order_id] = candidate;
-    if (persist_error.has_value()) {
-        ++stats_.log_write_failures;
-        return Error{"persistence", persist_error->message +
-                                        " (order was accepted by the venue; retry replays it)"};
-    }
-    return PlaceOutcome{.record = candidate, .replayed = false};
 }
 
 auto OrderManagementSystem::cancel(std::string_view a_client_order_id) -> Result<OrderRecord>
 {
-    const std::lock_guard lock(mutex_);
+    CancelRequest wire;
+    ExchangeConnector* connector = nullptr;
+    { // ---- snapshot + validate under the lock ----
+        const std::lock_guard lock(mutex_);
 
-    const auto it = lookup(a_client_order_id);
-    if (it == orders_.end()) {
-        return Error{"not_found", "unknown clientOrderId " + std::string{a_client_order_id}};
-    }
-    OrderRecord& record = it->second;
-    if (record.state == OrderState::Canceled) {
-        return record; // idempotent cancel
-    }
-    if (is_terminal(record.state)) {
-        return Error{"order_terminal", "order " + record.client_order_id + " is " +
-                                           std::string{state_to_string(record.state)}};
+        const auto it = lookup(a_client_order_id);
+        if (it == orders_.end()) {
+            return Error{"not_found", "unknown clientOrderId " + std::string{a_client_order_id}};
+        }
+        const OrderRecord& record = it->second;
+        if (record.state == OrderState::Canceled) {
+            return record; // idempotent cancel
+        }
+        if (is_terminal(record.state)) {
+            return Error{"order_terminal", "order " + record.client_order_id + " is " +
+                                               std::string{state_to_string(record.state)}};
+        }
+        connector = connector_for(record);
+        if (connector == nullptr) {
+            return Error{"internal", "no connector for venue \"" + record.venue + "\""};
+        }
+        wire = CancelRequest{record.client_order_id, record.symbol};
     }
 
-    ExchangeConnector* connector = connector_for(record);
-    if (connector == nullptr) {
-        return Error{"internal", "no connector for venue \"" + record.venue + "\""};
-    }
+    // ---- venue I/O without the lock ----
+    const auto placement = connector->cancel_order(wire);
 
-    const auto placement =
-        connector->cancel_order(CancelRequest{record.client_order_id, record.symbol});
-    if (!placement.is_ok()) {
-        return placement.error();
+    { // ---- apply to the (possibly progressed) record ----
+        const std::lock_guard lock(mutex_);
+        const auto it = lookup(a_client_order_id);
+        if (it == orders_.end()) {
+            return Error{"not_found", "unknown clientOrderId " + std::string{a_client_order_id}};
+        }
+        OrderRecord& record = it->second;
+        if (!placement.is_ok()) {
+            return placement.error();
+        }
+        note_exchange_id(record, placement.value().exchange_order_id);
+        // A successful venue cancel is definitive for a working order; the
+        // Live/PartiallyFilled -> Canceled steps are legal by precondition.
+        // A fill that raced the cancel request is honored: the state
+        // machine discards the terminal->Canceled regression.
+        if (apply_transition(record.state, OrderState::Canceled) == TransitionResult::Applied) {
+            append_event(state_event(record));
+        }
+        return record;
     }
-    if (!record.exchange_order_id.empty() && !placement.value().exchange_order_id.empty()) {
-        record.exchange_order_id = placement.value().exchange_order_id;
-    }
-    // A successful venue cancel is definitive for a working order; the
-    // Live/PartiallyFilled -> Canceled steps are legal by precondition.
-    if (apply_transition(record.state, OrderState::Canceled) == TransitionResult::Applied) {
-        append_event(state_event(record));
-    }
-    return record;
 }
 
 auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<OrderRecord>
@@ -377,58 +455,78 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
         return Error{"protocol", "amend requires a new price and/or quantity"};
     }
 
-    const std::lock_guard lock(mutex_);
+    AmendRequest wire;
+    ExchangeConnector* connector = nullptr;
+    { // ---- snapshot + validate + risk under the lock ----
+        const std::lock_guard lock(mutex_);
 
-    const auto it = lookup(a_command.client_order_id);
-    if (it == orders_.end()) {
-        return Error{"not_found", "unknown clientOrderId " + a_command.client_order_id};
-    }
-    OrderRecord& record = it->second;
-    if (is_terminal(record.state)) {
-        return Error{"order_terminal", "order " + record.client_order_id + " is " +
-                                           std::string{state_to_string(record.state)}};
-    }
-    ExchangeConnector* connector = connector_for(record);
-    if (connector == nullptr) {
-        return Error{"internal", "no connector for venue \"" + record.venue + "\""};
-    }
-
-    const std::string new_price = a_command.new_price.value_or(record.price);
-    const std::string new_quantity = a_command.new_quantity.value_or(record.quantity);
-
-    const auto limits = risk_.limits_for(record.symbol);
-    if (limits.has_value()) {
-        const RiskOrder risk_order{.side = record.side,
-                                   .price = new_price,
-                                   .quantity = new_quantity,
-                                   .projected_position = projected_position(
-                                       record.symbol, &record, record.side, new_quantity)};
-        if (const auto rejection = check_risk(limits, record.symbol, risk_order)) {
-            return *rejection;
+        const auto it = lookup(a_command.client_order_id);
+        if (it == orders_.end()) {
+            return Error{"not_found", "unknown clientOrderId " + a_command.client_order_id};
         }
+        const OrderRecord& record = it->second;
+        if (is_terminal(record.state)) {
+            return Error{"order_terminal", "order " + record.client_order_id + " is " +
+                                               std::string{state_to_string(record.state)}};
+        }
+        connector = connector_for(record);
+        if (connector == nullptr) {
+            return Error{"internal", "no connector for venue \"" + record.venue + "\""};
+        }
+
+        const std::string new_price = a_command.new_price.value_or(record.price);
+        const std::string new_quantity = a_command.new_quantity.value_or(record.quantity);
+
+        const auto limits = risk_.limits_for(record.symbol);
+        if (limits.has_value()) {
+            const RiskOrder risk_order{.side = record.side,
+                                       .price = new_price,
+                                       .quantity = new_quantity,
+                                       .projected_position =
+                                           projected_position(record.symbol, &record,
+                                                              record.client_order_id, record.side,
+                                                              new_quantity)};
+            if (const auto rejection = check_risk(limits, record.symbol, risk_order)) {
+                return *rejection;
+            }
+        }
+
+        wire = AmendRequest{.client_order_id = record.client_order_id,
+                            .instrument_id = record.symbol,
+                            .new_price = new_price,
+                            .new_quantity = new_quantity,
+                            .side = record.side,
+                            .type = record.type,
+                            .time_in_force = record.time_in_force};
     }
 
-    const auto placement =
-        connector->amend_order(AmendRequest{.client_order_id = record.client_order_id,
-                                            .instrument_id = record.symbol,
-                                            .new_price = new_price,
-                                            .new_quantity = new_quantity,
-                                            .side = record.side,
-                                            .type = record.type,
-                                            .time_in_force = record.time_in_force});
+    // ---- venue I/O without the lock ----
+    const auto placement = connector->amend_order(wire);
     if (!placement.is_ok()) {
         return placement.error();
     }
-    record.price = new_price;
-    record.quantity = new_quantity;
-    // Venues whose amend is a cancel+replace (Binance) issue a NEW
-    // exchangeOrderId for the replacement; in-place amend venues (OKX)
-    // echo the existing one.
-    if (!placement.value().exchange_order_id.empty()) {
-        record.exchange_order_id = placement.value().exchange_order_id;
+
+    { // ---- apply to the (possibly progressed) record ----
+        const std::lock_guard lock(mutex_);
+        const auto it = lookup(a_command.client_order_id);
+        if (it == orders_.end()) {
+            return Error{"not_found", "unknown clientOrderId " + a_command.client_order_id};
+        }
+        OrderRecord& record = it->second;
+        record.price = *wire.new_price;
+        record.quantity = *wire.new_quantity;
+        // Venues whose amend is a cancel+replace (Binance) issue a NEW
+        // exchangeOrderId for the replacement; in-place amend venues (OKX)
+        // echo the existing one.
+        note_exchange_id(record, placement.value().exchange_order_id);
+        if (record.state == OrderState::Canceled) {
+            // the replaced leg's CANCELED report raced this venue ack; the
+            // venue accepted the replacement, which is live
+            record.state = OrderState::Live;
+        }
+        append_event(amended_event(record));
+        return record;
     }
-    append_event(amended_event(record));
-    return record;
 }
 
 auto OrderManagementSystem::query(std::string_view a_client_order_id) -> Result<OrderRecord>
@@ -445,7 +543,8 @@ auto OrderManagementSystem::apply_observation(OrderRecord& a_record, OrderState 
                                               std::string_view a_filled,
                                               std::string_view a_avg_price,
                                               std::string_view a_price,
-                                              std::string_view a_quantity) -> bool
+                                              std::string_view a_quantity,
+                                              bool a_apply_lifecycle) -> bool
 {
     bool changed = false;
 
@@ -462,23 +561,34 @@ auto OrderManagementSystem::apply_observation(OrderRecord& a_record, OrderState 
         }
     }
 
-    if (a_state != a_record.state) {
-        if (apply_transition(a_record.state, a_state) == TransitionResult::Applied) {
+    if (a_apply_lifecycle) {
+        if (a_state != a_record.state) {
+            if (apply_transition(a_record.state, a_state) == TransitionResult::Applied) {
+                changed = true;
+            }
+        }
+
+        // Snapshots (REST / reconciliation) are authoritative for the current
+        // price/quantity; WS reports leave them untouched (empty view here).
+        if (!a_price.empty() && a_price != a_record.price) {
+            a_record.price = std::string{a_price};
+            changed = true;
+        }
+        if (!a_quantity.empty() && a_quantity != a_record.quantity) {
+            a_record.quantity = std::string{a_quantity};
             changed = true;
         }
     }
-
-    // Snapshots (REST / reconciliation) are authoritative for the current
-    // price/quantity; WS reports leave them untouched (empty view here).
-    if (!a_price.empty() && a_price != a_record.price) {
-        a_record.price = std::string{a_price};
-        changed = true;
-    }
-    if (!a_quantity.empty() && a_quantity != a_record.quantity) {
-        a_record.quantity = std::string{a_quantity};
-        changed = true;
-    }
     return changed;
+}
+
+void OrderManagementSystem::note_exchange_id(OrderRecord& a_record, const std::string& a_id)
+{
+    if (a_id.empty() || a_id == a_record.exchange_order_id) {
+        return;
+    }
+    a_record.exchange_order_id = a_id;
+    a_record.exchange_order_ids.push_back(a_id);
 }
 
 void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
@@ -486,13 +596,41 @@ void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
     const std::lock_guard lock(mutex_);
     const auto it = lookup(a_report.client_order_id);
     if (it == orders_.end()) {
+        // a place whose venue ack has not landed yet: buffer the report on
+        // the in-flight entry so it applies (and persists) right after the
+        // record exists, in replay-correct order
+        if (const auto flying = in_flight_.find(a_report.client_order_id);
+            flying != in_flight_.end()) {
+            flying->second.buffered_reports.push_back(a_report);
+            return;
+        }
         ++stats_.reports_unknown;
         return;
     }
-    if (apply_observation(it->second, a_report.state, a_report.filled_quantity,
-                          a_report.average_fill_price)) {
+    OrderRecord& record = it->second;
+
+    // Venue-lifecycle arbitration by exchange order id. cancelReplace
+    // venues (Binance) emit reports for BOTH legs of an amend under the
+    // same clientOrderId: the replaced order's CANCELED must not
+    // terminalize the live replacement. Rules (no report is ignored):
+    // - report id empty, or equal to the current id, or never seen
+    //   before (the in-flight replacement racing its own amend ack):
+    //   full lifecycle application
+    // - report id is a KNOWN but superseded id (an old amend leg):
+    //   fills still count (real executions, monotonic high-water mark),
+    //   state/price/quantity do not
+    bool apply_lifecycle = true;
+    if (!a_report.exchange_order_id.empty() && !record.exchange_order_id.empty() &&
+        a_report.exchange_order_id != record.exchange_order_id) {
+        const auto& history = record.exchange_order_ids;
+        apply_lifecycle = std::find(history.begin(), history.end(), a_report.exchange_order_id) ==
+                          history.end();
+    }
+
+    if (apply_observation(record, a_report.state, a_report.filled_quantity,
+                          a_report.average_fill_price, "", "", apply_lifecycle)) {
         ++stats_.reports_applied;
-        append_event(state_event(it->second));
+        append_event(state_event(record));
     } else {
         ++stats_.reports_stale;
     }
@@ -514,8 +652,12 @@ void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot
                        .filled_quantity =
                            a_snapshot.filled_quantity.empty() ? "0" : a_snapshot.filled_quantity,
                        .average_fill_price = a_snapshot.average_fill_price,
+                       .exchange_order_ids = {},
                        .adopted = a_adopted,
                        .rejection = std::nullopt};
+    if (!a_snapshot.exchange_order_id.empty()) {
+        record.exchange_order_ids = {a_snapshot.exchange_order_id};
+    }
     if (a_adopted) {
         append_event(adopted_event(record));
     } else {
@@ -526,18 +668,23 @@ void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot
 
 auto OrderManagementSystem::reconcile() -> ReconcileReport
 {
-    const std::lock_guard lock(mutex_);
     ReconcileReport report;
 
     // ---- Phase A: per venue, adopt venue-live orders missing locally ----
+    // Venue listings happen WITHOUT the lock (slow I/O must not block
+    // report application); adoption decisions re-check under it.
     for (const auto& [venue, connector] : connectors_) {
         const auto pending = connector->get_open_orders();
         if (!pending.is_ok()) {
             report.pending_listing_failed = true;
             continue;
         }
+        const std::lock_guard lock(mutex_);
         for (const auto& snapshot : pending.value()) {
-            if (snapshot.client_order_id.empty()) {
+            if (snapshot.client_order_id.empty() ||
+                in_flight_.find(snapshot.client_order_id) != in_flight_.end()) {
+                // an in-flight place owns this id: its own ack/report path
+                // records the outcome (adopting here would race it)
                 continue;
             }
             const auto it = lookup(snapshot.client_order_id);
@@ -554,20 +701,38 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
     }
 
     // ---- Phase B: resolve every non-terminal registry entry ----
-    std::vector<std::pair<std::string, std::string>> open;
-    for (const auto& [id, record] : orders_) {
-        if (!is_terminal(record.state)) {
-            open.emplace_back(id, record.venue);
+    // Snapshot the worklist under the lock; per-order venue lookups and
+    // their application each take the lock separately.
+    struct WorkItem
+    {
+        std::string id;
+        std::string venue;
+        OrderQuery query;
+    };
+    std::vector<WorkItem> open;
+    {
+        const std::lock_guard lock(mutex_);
+        for (const auto& [id, record] : orders_) {
+            if (!is_terminal(record.state)) {
+                const std::string& venue =
+                    record.venue.empty() ? default_venue_ : record.venue;
+                open.push_back(WorkItem{id, venue, OrderQuery{id, record.symbol}});
+            }
         }
     }
-    for (const auto& [id, venue] : open) {
-        OrderRecord& record = orders_.at(id);
-        ExchangeConnector* connector = connector_for(record);
+    for (const auto& item : open) {
+        const auto connector = connector_for(item.venue);
         if (connector == nullptr) {
             ++report.unresolved;
             continue;
         }
-        const auto snapshot = connector->get_order(OrderQuery{id, record.symbol});
+        const auto snapshot = connector->get_order(item.query);
+        const std::lock_guard lock(mutex_);
+        const auto it = lookup(item.id);
+        if (it == orders_.end()) {
+            continue; // removed while unlocked (nothing erases today; defensive)
+        }
+        OrderRecord& record = it->second;
         if (snapshot.is_ok() && snapshot.value().has_value()) {
             if (apply_observation(record, snapshot.value()->state,
                                   snapshot.value()->filled_quantity,
@@ -644,8 +809,12 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
                            .state = OrderState::Live,
                            .filled_quantity = "0",
                            .average_fill_price = "",
+                           .exchange_order_ids = {},
                            .adopted = *type == "adopted",
                            .rejection = std::nullopt};
+        if (!exchange_order_id.empty()) {
+            record.exchange_order_ids = {exchange_order_id};
+        }
         if (*type == "adopted") {
             record.state = parse_state(event_string(a_event, "state").value_or("live"))
                                .value_or(OrderState::Live);
@@ -680,6 +849,14 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         }
         if (quantity.has_value() && !quantity->empty()) {
             it->second.quantity = *quantity;
+        }
+        note_exchange_id(it->second, event_string(a_event, "exchangeOrderId").value_or(""));
+        // cancelReplace amends may follow a superseded leg's CANCELED
+        // state event with this one; the replacement is live
+        const auto state = parse_state(event_string(a_event, "state").value_or(""));
+        if (state.has_value() && it->second.state == OrderState::Canceled &&
+            *state == OrderState::Live) {
+            it->second.state = OrderState::Live;
         }
         return;
     }

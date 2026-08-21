@@ -4,9 +4,11 @@
 #include "core/event_log.hpp"
 #include "core/oms.hpp"
 
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -238,6 +240,77 @@ TEST_CASE("transport-unresolved places record nothing; retry reaches the venue")
     CHECK(retried.value().record.exchange_order_id == "ord-gw1");
 }
 
+TEST_CASE("execution reports racing an in-flight place are buffered and applied")
+{
+    // On WS-API venues (Binance) the executionReport frame can precede the
+    // order.place response, and the venue feed thread applies it while the
+    // place's venue call is still open. Regression for the lock-scope
+    // refactor: the report must neither deadlock, nor be lost, nor land
+    // before the place_accepted event (replay-correct log order).
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    connector.place_impl = [&oms](const OrderRequest& a_request) -> Result<OrderPlacement> {
+        oms.on_execution_report(
+            report(a_request.client_order_id, OrderState::Filled, "1", "50000"));
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-" + a_request.client_order_id};
+    };
+
+    const auto outcome = oms.place(buy_request());
+    REQUIRE(outcome.is_ok());
+    CHECK(outcome.value().record.state == OrderState::Filled);
+    CHECK(outcome.value().record.filled_quantity == "1");
+    CHECK(outcome.value().record.average_fill_price == "50000");
+    CHECK(outcome.value().record.exchange_order_id == "ord-gw1");
+    CHECK_FALSE(outcome.value().replayed);
+}
+
+TEST_CASE("a duplicate place while the venue call is in flight replays instead of re-sending")
+{
+    FakeConnector connector;
+    std::mutex mutex;
+    std::condition_variable cv;
+    int venue_entries = 0;
+    bool release = false;
+    connector.place_impl = [&](const OrderRequest& a_request) -> Result<OrderPlacement> {
+        {
+            const std::lock_guard lock(mutex);
+            ++venue_entries;
+            cv.notify_all();
+        }
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return release; }); // hold the venue call open
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-" + a_request.client_order_id};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+
+    bool first_ok = false;
+    std::thread first([&] {
+        const auto outcome = oms.place(buy_request());
+        first_ok = outcome.is_ok() && !outcome.value().replayed;
+    });
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return venue_entries == 1; });
+    }
+    const auto duplicate = oms.place(buy_request()); // same id, venue call open
+    REQUIRE(duplicate.is_ok());
+    CHECK(duplicate.value().replayed);
+    {
+        const std::lock_guard lock(mutex);
+        release = true;
+        cv.notify_all();
+    }
+    first.join();
+    CHECK(first_ok);
+    CHECK(connector.placed.size() == 1); // exactly one venue request was sent
+
+    const auto settled = oms.query("gw1");
+    REQUIRE(settled.is_ok());
+    CHECK(settled.value().exchange_order_id == "ord-gw1");
+}
+
 // ------------------------------------------------------- execution feeds ----
 
 TEST_CASE("execution reports advance state and dedupe exactly")
@@ -336,6 +409,56 @@ TEST_CASE("late fill data still lands after the state went terminal")
 }
 
 // -------------------------------------------------------- cancel / amend ----
+
+TEST_CASE("cancelReplace amends: superseded legs never terminalize the live replacement")
+{
+    // Binance-style amend: the venue cancels the old order (own report)
+    // and places a replacement (NEW exchangeOrderId) under the SAME
+    // clientOrderId. The old leg's CANCELED racing or following the amend
+    // must not terminalize the record; the replacement's reports drive it.
+    FakeConnector connector;
+    int amend_venue_id = 0;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&amend_venue_id, &oms_ptr](const AmendRequest& a_request) {
+        ++amend_venue_id;
+        // the replaced leg's CANCELED lands while the venue call is open
+        // (after validation, before the outcome applies)
+        oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0"));
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-replacement-" +
+                                                  std::to_string(amend_venue_id)};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request()).is_ok()); // exchangeOrderId ord-gw1
+
+    const auto amended = oms.amend(AmendCommand{"gw1", "51000", std::nullopt});
+    REQUIRE(amended.is_ok());
+    CHECK(amended.value().state == OrderState::Live); // un-canceled: replacement is live
+    CHECK(amended.value().exchange_order_id == "ord-replacement-1");
+
+    // a LATE duplicate of the old leg's CANCELED (superseded id ord-gw1):
+    // counted as stale for lifecycle purposes, fills still apply
+    oms.on_execution_report(report("gw1", OrderState::Canceled, "0"));
+    CHECK(oms.query("gw1").value().state == OrderState::Live);
+
+    // the second amend still works (the record was never terminalized)
+    const auto amended_again = oms.amend(AmendCommand{"gw1", "52000", std::nullopt});
+    REQUIRE(amended_again.is_ok());
+    CHECK(amended_again.value().exchange_order_id == "ord-replacement-2");
+
+    // the replacement fills on its own id
+    oms.on_execution_report(ExecutionReport{.client_order_id = "gw1",
+                                            .exchange_order_id = "ord-replacement-2",
+                                            .state = OrderState::Filled,
+                                            .side = Side::Buy,
+                                            .filled_quantity = "1",
+                                            .average_fill_price = "51000"});
+    const auto filled = oms.query("gw1");
+    REQUIRE(filled.is_ok());
+    CHECK(filled.value().state == OrderState::Filled);
+    CHECK(filled.value().filled_quantity == "1");
+}
 
 TEST_CASE("cancel is idempotent and rejects terminal orders clearly")
 {

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -64,8 +65,13 @@ using UnixMsProvider = std::function<long long()>;
 ///   re-subscribes the User Data Stream
 ///
 /// Threading: call() may be invoked from any thread (one request frame per
-/// call, sends serialized); events are delivered on the supervisor/reader
-/// thread. Handlers must be installed before start().
+/// call, sends serialized); feed events are delivered on a dedicated
+/// notifier thread so handlers may issue synchronous venue calls (e.g. a
+/// connectivity handler running reconciliation) without blocking the
+/// reader loop that would have to dispatch their responses. Execution
+/// reports are delivered on the supervisor/reader thread (they must stay
+/// ordered with the stream and are expected to be cheap). Handlers must
+/// be installed before start().
 class BinanceWsClient final
 {
   public:
@@ -115,8 +121,11 @@ class BinanceWsClient final
         bool failed = false;                    // session died / send failed
     };
 
-    void emit(BinanceFeedEventType a_type, std::string a_detail) const;
+    void emit(BinanceFeedEventType a_type, std::string a_detail);
     void run(std::stop_token a_stop);
+    /// Deliver queued feed events to the handler (never blocks the
+    /// reader loop; see the threading note above).
+    void pump_events(std::stop_token a_stop);
     /// One connect -> subscribe -> read cycle. Returns the failure reason
     /// that ended the session (empty when stopped by the caller).
     [[nodiscard]] auto run_session(std::stop_token a_stop) -> std::string;
@@ -146,7 +155,14 @@ class BinanceWsClient final
     EventHandler event_handler_;
 
     std::jthread supervisor_;
+    std::jthread event_notifier_;
     std::atomic<bool> running_{false};
+
+    /// Event hand-off queue: emit() (reader loop) enqueues, the notifier
+    /// thread drains. Guards event_handler_ as well.
+    std::mutex event_mutex_;
+    std::condition_variable event_cv_;
+    std::deque<BinanceFeedEvent> event_queue_;
 
     /// Active session (supervisor-owned lifetime; sends from other threads
     /// hold this mutex so the pointer is never used mid-swap). The inner

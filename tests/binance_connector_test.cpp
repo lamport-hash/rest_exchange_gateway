@@ -5,6 +5,7 @@
 
 #include "exchange/binance/binance_connector.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -108,6 +109,25 @@ TEST_CASE_FIXTURE(ConnectorFixture, "place maps the venue ack into a placement")
     CHECK(placement.value().client_order_id == "co0001");
     CHECK_FALSE(placement.value().exchange_order_id.empty());
     CHECK(server_->wait_for_places(1, 5000));
+}
+
+TEST_CASE_FIXTURE(ConnectorFixture, "place without timeInForce defaults to GTC")
+{
+    // venue-agnostic schema: the client may omit timeInForce; OKX
+    // venue-defaults to GTC, so the Binance adapter must too
+    connector_->start();
+    auto request = place_request("co0013");
+    request.time_in_force.clear();
+    const auto placement = connector_->place_order(request);
+    REQUIRE(placement.is_ok());
+    CHECK(server_->wait_for_places(1, 5000));
+    const auto frames = server_->stats().received;
+    const auto frame = std::find_if(
+        frames.begin(), frames.end(), [](const std::string& a_frame) {
+            return a_frame.find("\"timeInForce\":\"GTC\"") != std::string::npos &&
+                   a_frame.find("co0013") != std::string::npos;
+        });
+    CHECK(frame != frames.end());
 }
 
 TEST_CASE_FIXTURE(ConnectorFixture, "venue rejections pass through with venue codes")
