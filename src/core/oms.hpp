@@ -35,6 +35,12 @@ struct OrderRecord
     /// Monotonic high-water mark of reported fills.
     std::string filled_quantity = "0";
     std::string average_fill_price;
+    /// Full venue-side lifecycle of this clientOrderId: every exchange
+    /// order id it ever had (place + each amend; cancelReplace venues
+    /// like Binance issue a NEW id per amend, in-place venues like OKX
+    /// keep one). exchange_order_id is always the last entry. Reports
+    /// for superseded ids may only contribute fills, never state.
+    std::vector<std::string> exchange_order_ids;
     /// Discovered live on the venue during (re)start reconciliation.
     bool adopted = false;
     /// Set when state == Rejected: the recorded rejection replayed to
@@ -96,11 +102,21 @@ struct OmsStats
 /// - append-only persistence of every applied event + startup replay
 /// - startup/reconnect reconciliation with every venue
 ///
-/// Concurrency: all state is guarded by one mutex. Venue (connector) calls
-/// are made while holding it, so a slow venue call delays other OMS
-/// operations — a deliberate trade for simplicity and correctness (no
-/// re-validation races); the REST layer stays responsive because it only
-/// waits on this mutex.
+/// Concurrency: mutex_ guards the registry (and the in-flight staging
+/// map) only; venue (connector) calls are made WITHOUT holding it. A
+/// venue feed thread applying execution reports therefore never waits
+/// behind venue I/O (on WS-API venues like Binance the same connection
+/// carries request responses, so a blocked feed thread would stall the
+/// client's own ack). Consequences, handled explicitly:
+/// - execution reports racing an in-flight place are buffered per
+///   clientOrderId and applied right after the place outcome lands
+/// - a concurrent duplicate place of an in-flight clientOrderId replays
+///   the staged candidate instead of sending a second venue request
+/// - pre-trade risk projects positions across the registry AND other
+///   in-flight candidates
+/// Registry mutations re-validate under the lock (state machine guards
+/// illegal transitions); cancel/amend snapshot what they need before the
+/// venue call and re-apply to the (possibly progressed) record after.
 class OrderManagementSystem
 {
   public:
@@ -173,9 +189,12 @@ class OrderManagementSystem
     /// when something changed. Transitions go through the state machine
     /// (illegal/stale ones are discarded); filled_quantity only moves
     /// forward; snapshot price/quantity refresh the record when present.
+    /// a_apply_lifecycle=false (reports for superseded exchange order
+    /// ids): only the monotonic fill high-water mark is applied.
     auto apply_observation(OrderRecord& a_record, OrderState a_state, std::string_view a_filled,
                            std::string_view a_avg_price, std::string_view a_price = "",
-                           std::string_view a_quantity = "") -> bool;
+                           std::string_view a_quantity = "",
+                           bool a_apply_lifecycle = true) -> bool;
 
     /// Adopt/reject/... helpers shared by reconcile and replay.
     void record_from_snapshot(const OrderSnapshot& a_snapshot, const std::string& a_venue,
@@ -186,10 +205,12 @@ class OrderManagementSystem
     /// Worst-case signed position for a_symbol if every working order
     /// (plus the candidate amount) fully filled. a_replace non-null: the
     /// candidate replaces that record's contribution (amend); null: the
-    /// candidate is a fresh order (place). Sums across venues: the same
-    /// instrument traded on two venues is one net position.
+    /// candidate is a fresh order (place). a_exclude_id: the candidate's
+    /// own clientOrderId (never double-counted). Sums across venues: the
+    /// same instrument traded on two venues is one net position. In-flight
+    /// place candidates count at their full quantity.
     auto projected_position(const std::string& a_symbol, const OrderRecord* a_replace,
-                            Side a_candidate_side,
+                            const std::string& a_exclude_id, Side a_candidate_side,
                             const std::string& a_candidate_qty) -> std::string;
 
     /// Append an event; counts failures (venue truth already applied).
@@ -202,12 +223,30 @@ class OrderManagementSystem
 
     void apply_log_event(const nlohmann::json& a_event);
 
+    /// Register a venue order id on the record: current moves to a_id,
+    /// the full lifecycle (exchange_order_ids) accumulates. No-op for an
+    /// empty id or one that is already current.
+    void note_exchange_id(OrderRecord& a_record, const std::string& a_id);
+
     std::map<std::string, ExchangeConnector*> connectors_;
     std::string default_venue_;
     EventLog* log_;
     RiskConfig risk_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, OrderRecord> orders_;
+
+    /// Places whose venue I/O is running (guarded by mutex_). Buffers
+    /// execution reports that race the venue ack so they apply right
+    /// after the record lands in the registry (log order stays
+    /// place_accepted -> state). Transport-unresolved places erase their
+    /// entry: nothing is recorded, the client retry reaches the venue.
+    struct InFlightPlace
+    {
+        OrderRecord candidate;
+        std::vector<ExecutionReport> buffered_reports;
+    };
+    std::unordered_map<std::string, InFlightPlace> in_flight_;
+
     OmsStats stats_;
 };
 

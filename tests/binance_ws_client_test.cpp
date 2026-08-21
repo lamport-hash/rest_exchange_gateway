@@ -161,6 +161,48 @@ TEST_CASE_FIXTURE(WsFixture, "connect, subscribe the user data stream, and place
     CHECK(server_->stats().places == 1);
 }
 
+TEST_CASE("a feed event handler may issue synchronous venue calls")
+{
+    // Regression: connectivity handlers run reconciliation (get_open_orders
+    // etc.). When events were delivered on the reader loop, such a handler
+    // deadlocked until request_timeout because only the blocked reader
+    // could dispatch its response. Events are now delivered on a notifier
+    // thread, so the handler's call must succeed promptly.
+    BinanceMockWsServer server{BinanceConfig{.api_key = "test-key",
+                                             .secret_key = "test-secret",
+                                             .host = "127.0.0.1",
+                                             .retry = gateway::RetryPolicy{}}};
+    server.start();
+    auto client = std::make_unique<BinanceWsClient>(fast_config(server));
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool handler_done = false;
+    client->set_event_handler([&](const BinanceFeedEvent& a_event) {
+        if (a_event.type != BinanceFeedEventType::Connected) {
+            return;
+        }
+        const auto result = client->call_signed("openOrders.status",
+                                                nlohmann::json{{"symbol", "BTCUSDT"}});
+        if (!result.is_ok()) {
+            return; // leave handler_done false: the test asserts success
+        }
+        const std::lock_guard lock(mutex);
+        handler_done = true;
+        cv.notify_all();
+    });
+    client->start();
+
+    bool ok = false;
+    {
+        std::unique_lock lock(mutex);
+        ok = cv.wait_for(lock, std::chrono::milliseconds{3000}, [&] { return handler_done; });
+    }
+    CHECK(ok); // the handler's synchronous venue call completed (no timeout)
+    client->stop();
+    server.stop();
+}
+
 TEST_CASE_FIXTURE(WsFixture, "venue rejections carry venue:<code> and 5xx become transport")
 {
     client_->start();
@@ -219,8 +261,26 @@ TEST_CASE_FIXTURE(WsFixture, "executionReport events interleave with pending req
     CHECK(report.average_fill_price == "50000");
 }
 
-TEST_CASE_FIXTURE(WsFixture, "duplicate execution reports are delivered verbatim")
+TEST_CASE_FIXTURE(WsFixture, "cancel reports are keyed by the original clientOrderId")
 {
+    // Regression: on CANCELED executionReports the venue puts its
+    // auto-generated cancel id in "c" and the ORIGINAL clientOrderId in
+    // "C"; the normalized report must stay keyed by the original.
+    client_->start();
+    REQUIRE(events_.wait_for_count(BinanceFeedEventType::Connected, 1, 5000));
+    REQUIRE(server_->wait_for_subscriber(5000));
+
+    server_->push_raw_frame(
+        R"({"subscriptionId":0,"event":{"e":"executionReport","E":1,"s":"BTCUSDT",)"
+        R"("c":"gAoVEW9zYFs8jreejCDBR6","C":"ws0001","S":"BUY","o":"LIMIT",)"
+        R"("X":"CANCELED","i":42,"z":"0.00000000"}})");
+    REQUIRE(reports_.wait_for(1, 5000));
+    const auto& report = reports_.latest();
+    CHECK(report.client_order_id == "ws0001");
+    CHECK(report.state == gateway::OrderState::Canceled);
+}
+
+TEST_CASE_FIXTURE(WsFixture, "duplicate execution reports are delivered verbatim"){
     client_->start();
     REQUIRE(events_.wait_for_count(BinanceFeedEventType::Connected, 1, 5000));
     REQUIRE(server_->wait_for_subscriber(5000));

@@ -76,3 +76,6 @@ Testing/
 config/gateway.json
 config/*.local.json
 
+
+# runtime gateway output (default persistence path)
+data/

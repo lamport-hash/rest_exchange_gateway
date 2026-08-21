@@ -149,8 +149,9 @@ withdrawals disabled (true for both OKX demo and Binance testnet keys).
   dropped reports, WS kills and endpoint death/restart.
 - Black-box client rig (`tests/blackbox/`, 44 assertions) drives the real
   gateway binary over HTTP against a standalone fake OKX venue.
-- Live OKX demo suite (`tests/live/okx_live_func_tests.sh`, 68 assertions,
-  no mocks) and runbook (`doc/exchanges_func.md`).
+- Live venue suites (`tests/live/live_func_tests.sh okx|binance`,
+  85 assertions per venue, no mocks) and runbook
+  (`doc/exchanges_func.md`).
 
 All network-dependent behavior is mocked; CI never needs connectivity.
 
@@ -229,10 +230,12 @@ Black-box client suite against the real binary + fake venue:
 tests/blackbox/run_docker_client.sh          # 44 assertions, ~10 seconds
 ```
 
-Live OKX demo suite (needs real demo credentials in the config):
+Live venue suites (need real demo/testnet credentials in the config):
 
 ```bash
-tests/live/okx_live_func_tests.sh            # runbook: doc/exchanges_func.md
+tests/live/live_func_tests.sh okx            # OKX demo trading
+tests/live/live_func_tests.sh binance        # Binance spot testnet
+                                             # runbook: doc/exchanges_func.md
 ```
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
