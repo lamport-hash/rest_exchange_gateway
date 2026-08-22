@@ -4,6 +4,8 @@ const state = {
   tests: [],
   runsByTest: {},   // test_id -> latest run record
   openLogs: new Set(), // test ids whose log row is expanded
+  orders: [],
+  lastOrdersOk: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -11,6 +13,20 @@ const $ = (sel) => document.querySelector(sel);
 async function fetchJson(url, opts) {
   const res = await fetch(url, opts);
   return res.json();
+}
+
+/* ------------------------------------------------------------------- tabs -- */
+
+function initTabs() {
+  document.querySelectorAll("#tabs .tab").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll("#tabs .tab").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+      btn.classList.add("active");
+      $(`#tab-${btn.dataset.tab}`).classList.add("active");
+      if (btn.dataset.tab === "diagrams") renderDiagrams(); // lazy, once
+    };
+  });
 }
 
 /* ---------------------------------------------------------------- panels -- */
@@ -62,6 +78,8 @@ function renderGateway(data) {
 function renderOrders(data) {
   const tbody = $("#orders-table tbody");
   const orders = data.orders || [];
+  state.orders = orders;
+  state.lastOrdersOk = !data.error;
   $("#orders-empty").style.display = orders.length ? "none" : "block";
   $("#orders-count").textContent = orders.length ? `${orders.length} order(s)` : "";
   tbody.innerHTML = "";
@@ -84,6 +102,235 @@ function renderOrders(data) {
     stateTd.appendChild(span);
     tr.appendChild(stateTd);
     tbody.appendChild(tr);
+  }
+  renderStateChart();
+}
+
+/* ------------------------------------------------------ state visualization -- */
+
+const STATES = ["live", "partially_filled", "filled", "canceled", "rejected"];
+
+function renderStateChart() {
+  const chart = $("#state-chart");
+  if (!chart) return;
+  const counts = Object.fromEntries(STATES.map((s) => [s, 0]));
+  let total = 0;
+  for (const o of state.orders) {
+    if (counts[o.state] != null) counts[o.state] += 1;
+    total += 1;
+  }
+  $("#states-empty").style.display = total ? "none" : "block";
+  $("#states-total").textContent = total ? `${total} order(s)` : "";
+  chart.innerHTML = "";
+  for (const s of STATES) {
+    const n = counts[s];
+    const frac = total ? (100 * n) / total : 0;
+    const row = document.createElement("div");
+    row.className = "chart-row";
+    row.innerHTML =
+      `<span class="chart-label"><span class="state ${s}">${s}</span></span>` +
+      `<div class="chart-bar"><div class="chart-fill ${s}" style="width:${frac}%"></div></div>` +
+      `<span class="chart-value mono">${n}</span>`;
+    chart.appendChild(row);
+  }
+}
+
+/* ------------------------------------------------------------ api playground -- */
+
+const ENDPOINTS = [
+  {
+    id: "place", label: "POST /orders — place order", method: "POST", path: "/orders",
+    description: "Place a limit or market order. clientOrderId is the idempotency key: retrying a known id replays its recorded outcome verbatim.",
+    fields: [
+      ["clientOrderId", "required", "1–32 chars, [A-Za-z0-9] only — idempotency key"],
+      ["venue", "optional", "OKX | BINANCE (case-insensitive); default from config"],
+      ["symbol", "required", "gateway spelling everywhere: BTC-USDT"],
+      ["side", "required", "buy | sell"],
+      ["type", "required", "limit | market"],
+      ["price", "conditional", "required for limit, forbidden for market; plain decimal"],
+      ["quantity", "required", "plain decimal"],
+      ["timeInForce", "optional", "GTC | IOC | FOK — limit orders only"],
+    ],
+    body: JSON.stringify({
+      clientOrderId: "ui0001", venue: "OKX", symbol: "BTC-USDT",
+      side: "buy", type: "limit", price: "30000", quantity: "0.01", timeInForce: "GTC",
+    }, null, 2),
+    example: `201 {"clientOrderId":"ui0001","exchangeOrderId":"12569099453","symbol":"BTC-USDT",
+     "venue":"OKX","state":"live","replayed":false}`,
+  },
+  {
+    id: "list", label: "GET /orders — list", method: "GET", path: "/orders",
+    description: "Full registry snapshot sorted by clientOrderId (no pagination yet).",
+    fields: [],
+    body: null,
+    example: `200 {"orders":[ { …order record… }, … ]}`,
+  },
+  {
+    id: "status", label: "GET /orders/{id} — status", method: "GET", path: "/orders/ui0001",
+    description: "Served from the local registry (WS-fed + reconcile) — no venue round-trip.",
+    fields: [],
+    body: null,
+    example: `200 {"clientOrderId":"ui0001","state":"partially_filled","filledQuantity":"0.04", …}`,
+  },
+  {
+    id: "amend", label: "PUT /orders/{id} — amend", method: "PUT", path: "/orders/ui0001",
+    description: "Amend price and/or quantity (null = unchanged; at least one required). Risk checks re-run. Binance emulates with cancel+replace; clientOrderId stays stable.",
+    fields: [
+      ["price", "optional", "new price — plain decimal"],
+      ["quantity", "optional", "new quantity — plain decimal"],
+    ],
+    body: JSON.stringify({ price: "30100", quantity: "0.02" }, null, 2),
+    example: `200 {"clientOrderId":"ui0001","exchangeOrderId":"…","state":"live","price":"30100","quantity":"0.02"}`,
+  },
+  {
+    id: "cancel", label: "DELETE /orders/{id} — cancel", method: "DELETE", path: "/orders/ui0001",
+    description: "Idempotent: canceling an already-canceled order returns 200 again without a venue call.",
+    fields: [],
+    body: null,
+    example: `200 {"clientOrderId":"ui0001","state":"canceled", …}`,
+  },
+  {
+    id: "health", label: "GET /health — liveness", method: "GET", path: "/health",
+    description: "Registry stats; reportsStale counts duplicate/out-of-order execution reports safely discarded.",
+    fields: [],
+    body: null,
+    example: `200 {"status":"ok","knownOrders":3,"reportsApplied":12,"reportsStale":2}`,
+  },
+];
+
+function highlightJson(text) {
+  const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // single pass: string | literal | number — whichever group matched wins,
+  // so numbers inside strings stay untouched (no lookbehind: older Safari)
+  return esc.replace(
+    /("(?:[^"\\]|\\.)*")|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (_m, str, lit, num) => {
+      if (str) return `<span class="j-key">${str}</span>`;
+      if (lit) return `<span class="j-lit">${lit}</span>`;
+      return `<span class="j-num">${num}</span>`;
+    },
+  );
+}
+
+function renderEndpoints() {
+  const select = $("#pg-endpoint");
+  for (const ep of ENDPOINTS) {
+    const opt = document.createElement("option");
+    opt.value = ep.id;
+    opt.textContent = ep.label;
+    select.appendChild(opt);
+  }
+  const applyEndpoint = () => {
+    const ep = ENDPOINTS.find((e) => e.id === select.value);
+    $("#pg-method").value = ep.method;
+    $("#pg-path").value = ep.path;
+    $("#pg-body").value = ep.body ?? "";
+    $("#pg-body").disabled = !ep.body && (ep.method === "GET" || ep.method === "DELETE");
+    $("#pg-example").textContent = ep.example;
+  };
+  select.onchange = applyEndpoint;
+  applyEndpoint();
+
+  $("#pg-send").onclick = async () => {
+    const statusEl = $("#pg-status");
+    const pre = $("#pg-response");
+    statusEl.textContent = "…";
+    statusEl.className = "badge unknown";
+    $("#pg-latency").textContent = "";
+    try {
+      const data = await fetchJson("/api/proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: $("#pg-method").value,
+          path: $("#pg-path").value,
+          body: $("#pg-body").value || null,
+        }),
+      });
+      if (!data.ok) {
+        statusEl.textContent = "unreachable";
+        statusEl.className = "badge bad";
+        $("#pg-latency").textContent = `${data.latency_ms} ms`;
+        pre.textContent = data.error;
+        return;
+      }
+      statusEl.textContent = `HTTP ${data.status}`;
+      statusEl.className = `badge ${data.status < 300 ? "ok" : data.status < 500 ? "warn" : "bad"}`;
+      $("#pg-latency").textContent = `${data.latency_ms} ms`;
+      const text = typeof data.body === "string" ? data.body : JSON.stringify(data.body, null, 2);
+      pre.innerHTML = highlightJson(text);
+    } catch (e) {
+      statusEl.textContent = "error";
+      statusEl.className = "badge bad";
+      pre.textContent = String(e);
+    }
+  };
+
+  const cards = $("#endpoint-cards");
+  for (const ep of ENDPOINTS) {
+    const card = document.createElement("div");
+    card.className = "endpoint-card";
+    const head = document.createElement("div");
+    head.className = "endpoint-head";
+    const chip = document.createElement("span");
+    chip.className = `http-chip ${ep.method}`;
+    chip.textContent = ep.method;
+    const pathEl = document.createElement("span");
+    pathEl.className = "mono";
+    pathEl.textContent = " " + ep.path.replace("ui0001", "{clientOrderId}");
+    head.appendChild(chip);
+    head.appendChild(pathEl);
+    card.appendChild(head);
+    const desc = document.createElement("div");
+    desc.className = "muted endpoint-desc";
+    desc.textContent = ep.description;
+    card.appendChild(desc);
+    if (ep.fields.length) {
+      const table = document.createElement("table");
+      table.className = "fields";
+      table.innerHTML = "<thead><tr><th>field</th><th>req/opt</th><th>rules</th></tr></thead>";
+      const tb = document.createElement("tbody");
+      for (const [f, r, note] of ep.fields) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td class="mono">${f}</td><td>${r}</td><td class="muted">${note}</td>`;
+        tb.appendChild(tr);
+      }
+      table.appendChild(tb);
+      card.appendChild(table);
+    }
+    const ex = document.createElement("pre");
+    ex.className = "json";
+    ex.textContent = ep.example;
+    card.appendChild(ex);
+    cards.appendChild(card);
+  }
+}
+
+/* --------------------------------------------------------------- diagrams -- */
+
+let diagramsDone = false;
+
+async function renderDiagrams() {
+  if (diagramsDone) return;
+  diagramsDone = true;
+  const nodes = document.querySelectorAll(".mermaid-src");
+  if (typeof window.mermaid === "undefined") {
+    // vendored mermaid.min.js missing — the raw sources stay visible as <pre>
+    nodes.forEach((n) => n.classList.add("mermaid-fallback"));
+    return;
+  }
+  try {
+    window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+    for (const node of nodes) {
+      const { svg } = await window.mermaid.render(`m-${node.id}`, node.textContent);
+      const holder = document.createElement("div");
+      holder.className = "diagram";
+      holder.innerHTML = svg;
+      node.replaceWith(holder);
+    }
+  } catch {
+    nodes.forEach((n) => n.classList.add("mermaid-fallback"));
   }
 }
 
@@ -247,8 +494,6 @@ async function launch(t) {
 
 /* ---------------------------------------------------------------- refresh -- */
 
-let logRefreshTimer = null;
-
 async function refreshRuns() {
   const data = await fetchJson("/api/runs");
   const byTest = {};
@@ -274,6 +519,8 @@ async function refreshAll() {
 }
 
 async function init() {
+  initTabs();
+  renderEndpoints();
   const data = await fetchJson("/api/tests");
   state.tests = data.tests || [];
   document.querySelectorAll(".runall button").forEach((btn) => {

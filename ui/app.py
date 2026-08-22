@@ -18,6 +18,7 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "data" / "ui-runs"
@@ -344,6 +346,69 @@ def orders() -> JSONResponse:
         return JSONResponse({"orders": body.get("orders", [])})
     except Exception as exc:
         return JSONResponse({"orders": [], "error": str(exc)}, status_code=200)
+
+
+# ------------------------------------------------------------- api playground ---
+
+_PROXY_METHODS = {"GET", "POST", "PUT", "DELETE"}
+
+
+class _ProxyRequest(BaseModel):
+    method: str
+    path: str
+    body: str | None = None
+
+
+@app.post("/api/proxy")
+def proxy(req: _ProxyRequest) -> JSONResponse:
+    """Forward one hand-crafted request to the gateway (API playground).
+
+    Only the gateway's own REST surface is reachable: the path must start
+    with a known route prefix, and only idempotent-safe methods plus the
+    documented order verbs are allowed.
+    """
+    method = req.method.upper()
+    if method not in _PROXY_METHODS:
+        raise HTTPException(status_code=400, detail=f"method {method} not allowed")
+    path = req.path
+    if not path.startswith("/") or ".." in path or "://" in path:
+        raise HTTPException(status_code=400, detail="path must be an absolute gateway path")
+    if not path.startswith(("/orders", "/health")):
+        raise HTTPException(status_code=400, detail="path must target /orders or /health")
+
+    data = None
+    if method in ("POST", "PUT"):
+        if req.body:
+            try:
+                data = json.dumps(json.loads(req.body)).encode()
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail=f"body is not valid JSON: {exc}")
+    elif req.body:
+        raise HTTPException(status_code=400, detail=f"{method} must not carry a body")
+
+    request = urllib.request.Request(  # noqa: S310 - fixed gateway base URL
+        GATEWAY_URL + path, data=data, method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=15.0) as resp:
+            status, raw = resp.status, resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as exc:
+        status, raw = exc.code, exc.read().decode(errors="replace")
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "status": None, "latency_ms": round((time.perf_counter() - started) * 1000),
+             "error": f"gateway unreachable: {exc}"}
+        )
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = raw
+    return JSONResponse(
+        {"ok": True, "status": status, "latency_ms": round((time.perf_counter() - started) * 1000),
+         "body": parsed}
+    )
 
 
 _load_history()

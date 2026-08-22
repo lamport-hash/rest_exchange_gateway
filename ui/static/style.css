@@ -126,3 +126,156 @@ pre.log {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ------------------------------------------------------------------- tabs -- */
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 41px;
+  z-index: 4;
+}
+#tabs .tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+#tabs .tab:hover { color: var(--text); border-color: var(--border); }
+#tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* -------------------------------------------------------- api playground -- */
+
+#playground {
+  display: grid;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 12px;
+}
+.pg-controls { display: flex; gap: 8px; }
+.pg-controls select { flex: 0 1 340px; }
+.pg-controls input {
+  background: #0b0e12;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+#pg-method { width: 74px; text-align: center; color: var(--accent); font-weight: 700; }
+#pg-path { flex: 1; font-family: var(--mono); }
+#pg-body {
+  background: #0b0e12;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  resize: vertical;
+}
+#pg-body:disabled { opacity: 0.45; }
+#pg-example { font-size: 11px; white-space: pre-wrap; }
+.pg-meta { display: flex; align-items: center; gap: 10px; }
+#pg-latency { font-size: 12px; }
+
+pre.json {
+  margin: 0;
+  padding: 10px 12px;
+  background: #0b0e12;
+  border: 1px solid var(--border);
+  overflow: auto;
+  max-height: 420px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #9fb0c3;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.j-key { color: #6cb2ff; }
+.j-lit { color: #e5b567; }
+.j-num { color: #58d59a; }
+.curl-example { white-space: pre; word-break: normal; }
+
+/* ------------------------------------------------------------ state chart -- */
+
+#state-chart { display: grid; gap: 6px; padding: 4px 0; }
+.chart-row { display: grid; grid-template-columns: 150px 1fr 48px; align-items: center; gap: 10px; }
+.chart-bar {
+  height: 14px;
+  background: #0b0e12;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.chart-fill { height: 100%; min-width: 0; transition: width 0.4s; }
+.chart-fill.live             { background: #2ea86c; }
+.chart-fill.partially_filled { background: #d29a2c; }
+.chart-fill.filled           { background: #4c8dff; }
+.chart-fill.canceled         { background: #566070; }
+.chart-fill.rejected         { background: #d2564f; }
+.chart-value { text-align: right; }
+
+/* --------------------------------------------------------- endpoint cards -- */
+
+#endpoint-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; }
+.endpoint-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.endpoint-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.http-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 4px;
+}
+.http-chip.POST   { background: #103524; color: #58d59a; }
+.http-chip.GET    { background: #0e2f4a; color: #6cb2ff; }
+.http-chip.PUT    { background: #33290e; color: #e5b567; }
+.http-chip.DELETE { background: #3a1715; color: #ff8a80; }
+.endpoint-desc { font-size: 12px; }
+table.fields { font-size: 12px; }
+table.fields td { padding: 3px 8px; }
+.endpoint-card pre.json { max-height: 110px; }
+
+#errors-table td { font-size: 12px; }
+
+/* --------------------------------------------------------------- diagrams -- */
+
+.diagram {
+  background: #0b0e12;
+  border: 1px solid var(--border);
+  padding: 14px;
+  overflow: auto;
+  text-align: center;
+}
+.diagram svg { max-width: 100%; height: auto; }
+pre.mermaid-src {
+  margin: 0;
+  padding: 12px;
+  background: #0b0e12;
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #9fb0c3;
+  overflow: auto;
+  white-space: pre;
+}
+pre.mermaid-fallback { border-color: var(--warn); }

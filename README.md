@@ -259,15 +259,21 @@ docker compose up -d                         # dev + gateway + ui
   Stop it (`docker compose stop gateway`) before `examples/run_gateway.sh`
   to avoid competing for port 8080.
 - **`ui` service** — FastAPI backend (`ui/app.py`) + one static page
-  (`ui/static/`). Top panel: gateway health badge, WS feed state (derived
-  from `reconcile` / `feed_disconnected` events), OMS stats, event ticker,
-  and the orders table (the `GET /orders` registry listing, refreshed every
-  2s). Below: a large test table — all 21 ctest suites in both presets
-  (debug = ASan+UBSan), the black-box rig, and the live venue suites, each
-  with a Run button, live log tail, parsed outcome summary and duration.
-  Tests execute in the UI container, one at a time (the suites claim fixed
-  ports); live rows ask for confirmation because they spend demo/testnet
-  funds. Run history persists under `data/ui-runs/`.
+  (`ui/static/`), organized in tabs: **Monitor** (health badge, WS feed
+  state derived from `reconcile` / `feed_disconnected` events, OMS stats,
+  event ticker, orders table refreshed every 2s), **API** (endpoint
+  reference with field rules and curl examples from `doc/api.md`, a live
+  playground that proxies hand-crafted requests to the gateway
+  (`POST /api/proxy`) with status/latency/JSON-highlighted responses, and
+  an order-state distribution chart), **Diagrams** (architecture, order
+  state machine, place idempotency and restart-recovery mermaid diagrams,
+  rendered offline from a vendored `mermaid.min.js`), and **Tests** — all
+  21 ctest suites in both presets (debug = ASan+UBSan), the black-box
+  rig, and the live venue suites, each with a Run button, live log tail,
+  parsed outcome summary and duration. Tests execute in the UI container,
+  one at a time (the suites claim fixed ports); live rows ask for
+  confirmation because they spend demo/testnet funds. Run history
+  persists under `data/ui-runs/`.
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
 

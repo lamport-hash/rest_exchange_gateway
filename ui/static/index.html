@@ -15,50 +15,267 @@
     <div id="clock" class="muted"></div>
   </header>
 
-  <section id="events">
-    <span class="label">recent events</span>
-    <div id="event-ticker" class="muted">–</div>
-  </section>
+  <nav id="tabs">
+    <button class="tab active" data-tab="monitor">Monitor</button>
+    <button class="tab" data-tab="api">API</button>
+    <button class="tab" data-tab="diagrams">Diagrams</button>
+    <button class="tab" data-tab="tests">Tests</button>
+  </nav>
 
-  <section>
-    <div class="section-head">
-      <h2>Orders</h2>
-      <span id="orders-count" class="muted"></span>
-    </div>
-    <table id="orders-table">
-      <thead>
-        <tr>
-          <th>clientOrderId</th><th>venue</th><th>symbol</th><th>side</th>
-          <th>type</th><th>price</th><th>qty</th><th>filled</th>
-          <th>avg fill</th><th>exchangeOrderId</th><th>state</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    <div id="orders-empty" class="muted">no orders known to the gateway</div>
-  </section>
+  <!-- =============================================================== monitor -->
+  <div id="tab-monitor" class="tab-panel active">
+    <section id="events">
+      <span class="label">recent events</span>
+      <div id="event-ticker" class="muted">–</div>
+    </section>
 
-  <section>
-    <div class="section-head">
-      <h2>Tests</h2>
-      <div class="runall">
-        <button data-group="debug">Run all (debug)</button>
-        <button data-group="release">Run all (release)</button>
-        <button data-group="blackbox">Run blackbox</button>
+    <section>
+      <div class="section-head">
+        <h2>Orders</h2>
+        <span id="orders-count" class="muted"></span>
       </div>
-    </div>
-    <table id="tests-table">
-      <thead>
-        <tr>
-          <th></th><th>suite</th><th>preset</th><th>type</th>
-          <th>spec coverage</th><th class="col-outcome">outcome</th>
-          <th>duration</th><th>log</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
+      <table id="orders-table">
+        <thead>
+          <tr>
+            <th>clientOrderId</th><th>venue</th><th>symbol</th><th>side</th>
+            <th>type</th><th>price</th><th>qty</th><th>filled</th>
+            <th>avg fill</th><th>exchangeOrderId</th><th>state</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="orders-empty" class="muted">no orders known to the gateway</div>
+    </section>
+  </div>
 
+  <!-- =================================================================== api -->
+  <div id="tab-api" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>API playground</h2>
+        <span class="muted">requests are proxied to the live gateway — use throwaway clientOrderIds, retries replay recorded outcomes</span>
+      </div>
+      <div id="playground">
+        <div class="pg-controls">
+          <select id="pg-endpoint"></select>
+          <input id="pg-method" class="mono" readonly>
+          <input id="pg-path" class="mono" spellcheck="false">
+          <button id="pg-send">Execute</button>
+        </div>
+        <textarea id="pg-body" class="mono" rows="10" spellcheck="false" placeholder="request body (JSON)"></textarea>
+        <div id="pg-example" class="muted mono"></div>
+        <div id="pg-result">
+          <div class="pg-meta">
+            <span id="pg-status" class="badge unknown">–</span>
+            <span id="pg-latency" class="muted"></span>
+          </div>
+          <pre id="pg-response" class="json">no request sent yet</pre>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>Order state distribution</h2><span id="states-total" class="muted"></span></div>
+      <div id="state-chart"></div>
+      <div id="states-empty" class="muted">no orders — place one in the playground or check the Monitor tab</div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>Endpoints</h2><span class="muted">from doc/api.md — single schema, errors are always {"error":{code,reason,clientOrderId}}</span></div>
+      <div id="endpoint-cards"></div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>Error codes</h2></div>
+      <table id="errors-table">
+        <thead><tr><th>HTTP</th><th>code</th><th>meaning</th></tr></thead>
+        <tbody>
+          <tr><td>400</td><td class="mono">invalid_request</td><td>schema/field validation (unknown fields are named)</td></tr>
+          <tr><td>400</td><td class="mono">risk_max_qty / risk_max_notional / risk_max_position / risk_invalid_value</td><td>pre-trade risk rejection — reason carries the limit</td></tr>
+          <tr><td>404</td><td class="mono">not_found</td><td>unknown clientOrderId (incl. venue “does not exist”)</td></tr>
+          <tr><td>409</td><td class="mono">order_terminal</td><td>cancel/amend on a filled/canceled/rejected order</td></tr>
+          <tr><td>409</td><td class="mono">venue_rejected</td><td>venue rejected the request (reason carries the venue code)</td></tr>
+          <tr><td>502</td><td class="mono">venue_unavailable</td><td>transport failure, outcome unknown or unresolved</td></tr>
+          <tr><td>500</td><td class="mono">persistence / internal</td><td>local failure after venue acceptance / bug</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>curl examples</h2><span class="muted">host port-forwarded by compose (8080)</span></div>
+      <pre class="json curl-example">curl -s localhost:8080/orders -X POST -H 'Content-Type: application/json' -d '{
+  "clientOrderId": "ui0001", "venue": "OKX", "symbol": "BTC-USDT",
+  "side": "buy", "type": "limit", "price": "30000", "quantity": "0.01",
+  "timeInForce": "GTC" }'
+
+curl -s localhost:8080/orders                       # list
+curl -s localhost:8080/orders/ui0001                # status
+curl -s localhost:8080/orders/ui0001 -X PUT -H 'Content-Type: application/json' \
+     -d '{ "price": "30100", "quantity": "0.02" }'  # amend
+curl -s localhost:8080/orders/ui0001 -X DELETE      # cancel (idempotent)
+curl -s localhost:8080/health</pre>
+    </section>
+  </div>
+
+  <!-- =============================================================== diagrams -->
+  <div id="tab-diagrams" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>Architecture</h2>
+        <span class="muted">doc/project-archi.md</span>
+      </div>
+      <pre class="mermaid-src" id="diagram-architecture">flowchart TB
+    C([Client])
+
+    subgraph REST["REST layer (src/rest/)"]
+        R["Crow routes: POST/GET/DELETE/PUT /orders, GET /health&lt;br/&gt;one schema, one error envelope, zero venue code"]
+    end
+
+    subgraph CORE["OMS core (src/core/)"]
+        OMS["OrderManagementSystem&lt;br/&gt;clientOrderId registry + venue routing"]
+        SM["Order state machine&lt;br/&gt;(explicit transition table)"]
+        RK["Pre-trade risk&lt;br/&gt;maxQty / maxNotional / maxPosition"]
+        LOG["EventLog&lt;br/&gt;append-only JSONL"]
+    end
+
+    subgraph SEAM["ExchangeConnector (include/gateway/)"]
+        IC["place / cancel / amend / get / open-orders&lt;br/&gt;execution-report + connectivity callbacks"]
+    end
+
+    subgraph OKX["OKX adapter (src/exchange/okx/)"]
+        OKXR["signed REST /api/v5/trade/*"]
+        OKXW["WS private orders channel"]
+    end
+
+    subgraph BIN["Binance adapter (src/exchange/binance/)"]
+        BINW["WS-API order.place/cancel/cancelReplace"]
+        BINU["user-data stream executionReport"]
+    end
+
+    V1([OKX])
+    V2([Binance])
+
+    C -->|HTTP| R --> OMS
+    OMS --- SM --- RK
+    OMS --> LOG
+    OMS -->|venue-routed| IC
+    IC --> OKXR --> V1
+    OKXW -->|execution reports| IC
+    IC --> BINW --> V2
+    BINU -->|execution reports| IC
+    IC -->|normalized reports / connectivity| OMS</pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Order state machine</h2>
+        <span class="muted">illegal transitions are discarded, never errors — one rule arbitrates duplicates, out-of-order WS and REST-vs-WS races</span>
+      </div>
+      <pre class="mermaid-src" id="diagram-state">stateDiagram-v2
+    [*] --> Live : venue ack
+    [*] --> Rejected : risk / venue rejection
+    Live --> PartiallyFilled : partial fill
+    Live --> Filled : full fill
+    Live --> Canceled : cancel ack
+    Live --> Rejected : reconcile: venue absent
+    PartiallyFilled --> PartiallyFilled : more fills (monotonic)
+    PartiallyFilled --> Filled : full fill
+    PartiallyFilled --> Canceled : cancel ack
+    Filled --> [*]
+    Canceled --> [*]
+    Rejected --> [*]</pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Place: idempotency and unknown-outcome resolution</h2>
+        <span class="muted">three layers — registry replay, state-machine arbitration, adapter resolve-then-retry</span>
+      </div>
+      <pre class="mermaid-src" id="diagram-place">sequenceDiagram
+    participant C as Client
+    participant R as REST layer
+    participant O as OMS registry
+    participant A as Venue adapter
+    participant V as Exchange
+
+    C->>R: POST /orders {clientOrderId, …}
+    R->>O: place(request)
+    alt clientOrderId already known
+        O-->>C: recorded outcome, replayed=true (no venue call)
+    else new order
+        O->>O: pre-trade risk checks
+        alt rejected
+            O-->>C: 400 risk_*
+        else pass
+            O->>A: place (venue I/O outside registry lock)
+            A->>V: place order
+            alt ack received
+                A-->>O: exchangeOrderId
+                O->>O: append event log
+                O-->>C: 201 live
+            else transport failure (outcome unknown)
+                A->>V: lookup by clientOrderId
+                alt found
+                    A-->>O: synthesized ack
+                    O-->>C: 201 live
+                else conclusively absent
+                    A->>V: re-send identical order
+                else unresolved
+                    O-->>C: 502 venue_unavailable (nothing recorded — client may retry)
+                end
+            end
+        end
+    end</pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Restart recovery</h2>
+        <span class="muted">replay → reconnect feeds → reconcile; reconcile also runs on every WS reconnect</span>
+      </div>
+      <pre class="mermaid-src" id="diagram-recovery">sequenceDiagram
+    participant G as Gateway startup
+    participant L as Event log (JSONL)
+    participant O as OMS
+    participant V as Venues
+
+    G->>L: replay (torn tail truncated)
+    G->>O: rebuild registry
+    G->>V: connect feeds (WS login/subscribe)
+    G->>O: reconcile()
+    O->>V: get_open_orders per venue
+    O->>O: adopt venue-live unknown orders
+    O->>O: refresh fills, resolve non-terminal
+    O->>O: venue-absent -> Rejected / unreachable -> kept, warned
+    G->>G: serve REST; reconcile again on every WS reconnect</pre>
+    </section>
+  </div>
+
+  <!-- ================================================================== tests -->
+  <div id="tab-tests" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>Tests</h2>
+        <div class="runall">
+          <button data-group="debug">Run all (debug)</button>
+          <button data-group="release">Run all (release)</button>
+          <button data-group="blackbox">Run blackbox</button>
+        </div>
+      </div>
+      <table id="tests-table">
+        <thead>
+          <tr>
+            <th></th><th>suite</th><th>preset</th><th>type</th>
+            <th>spec coverage</th><th class="col-outcome">outcome</th>
+            <th>duration</th><th>log</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script src="/static/vendor/mermaid.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
