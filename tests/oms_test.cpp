@@ -425,8 +425,8 @@ TEST_CASE("cancelReplace amends: superseded legs never terminalize the live repl
         // (after validation, before the outcome applies)
         oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0"));
         return OrderPlacement{.client_order_id = a_request.client_order_id,
-                              .exchange_order_id = "ord-replacement-" +
-                                                  std::to_string(amend_venue_id)};
+                              .exchange_order_id =
+                                  "ord-replacement-" + std::to_string(amend_venue_id)};
     };
     OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
     oms_ptr = &oms;
@@ -880,6 +880,31 @@ TEST_CASE("stats expose registry size and arbitration counters")
     CHECK(stats.reports_unknown == 1);
     CHECK((stats.reports_applied + stats.reports_stale) == 1);
     CHECK(stats.log_write_failures == 0);
+}
+
+TEST_CASE("all_orders snapshots the registry sorted and isolated from mutation")
+{
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+
+    CHECK(oms.all_orders().empty());
+
+    REQUIRE(oms.place(buy_request("gw2", "1")).is_ok());
+    REQUIRE(oms.place(buy_request("gw1", "1")).is_ok());
+    oms.on_execution_report(report("gw1", OrderState::Filled, "1", "50000"));
+
+    const auto snapshot = oms.all_orders();
+    REQUIRE(snapshot.size() == 2);
+    // sorted by clientOrderId, not insertion order
+    CHECK(snapshot[0].client_order_id == "gw1");
+    CHECK(snapshot[1].client_order_id == "gw2");
+    CHECK(snapshot[0].state == OrderState::Filled);
+    CHECK(snapshot[1].state == OrderState::Live);
+
+    // the snapshot is a copy: reports applied afterwards do not leak in
+    oms.on_execution_report(report("gw2", OrderState::Filled, "1", "50000"));
+    CHECK(snapshot[1].state == OrderState::Live);
+    CHECK(oms.query("gw2").value().state == OrderState::Filled);
 }
 
 } // namespace

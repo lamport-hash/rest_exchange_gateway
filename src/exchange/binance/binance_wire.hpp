@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -164,6 +165,10 @@ class SymbolTranslator
     [[nodiscard]] auto to_gateway(std::string_view a_wire_symbol) -> std::string;
 
   private:
+    /// Guards both memo maps: the connector calls from concurrent REST
+    /// workers and the feed notifier thread (interface thread-safety
+    /// contract, exchange_connector.hpp).
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, std::string> gateway_to_wire_;
     std::unordered_map<std::string, std::string> wire_to_gateway_;
 };

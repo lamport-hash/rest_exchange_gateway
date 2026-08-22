@@ -242,8 +242,7 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
     // other in-flight place candidates are not in the registry yet but
     // may land as working orders; count them at full quantity
     for (const auto& [id, flight] : in_flight_) {
-        if (id == a_exclude_id ||
-            (a_replace != nullptr && id == a_replace->client_order_id)) {
+        if (id == a_exclude_id || (a_replace != nullptr && id == a_replace->client_order_id)) {
             continue;
         }
         const OrderRecord& candidate = flight.candidate;
@@ -318,14 +317,13 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
                               .rejection = std::nullopt};
         const auto limits = risk_.limits_for(a_request.instrument_id);
         if (limits.has_value()) {
-            const RiskOrder risk_order{
-                .side = a_request.side,
-                .price = a_request.price,
-                .quantity = a_request.quantity,
-                .projected_position =
-                    projected_position(a_request.instrument_id, nullptr,
-                                       a_request.client_order_id, a_request.side,
-                                       a_request.quantity)};
+            const RiskOrder risk_order{.side = a_request.side,
+                                       .price = a_request.price,
+                                       .quantity = a_request.quantity,
+                                       .projected_position =
+                                           projected_position(a_request.instrument_id, nullptr,
+                                                              a_request.client_order_id,
+                                                              a_request.side, a_request.quantity)};
             if (const auto rejection = check_risk(limits, a_request.instrument_id, risk_order)) {
                 candidate.state = OrderState::Rejected;
                 candidate.rejection = *rejection;
@@ -339,9 +337,9 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
             }
         }
 
-        in_flight_.emplace(a_request.client_order_id,
-                           InFlightPlace{.candidate = std::move(candidate),
-                                         .buffered_reports = {}});
+        in_flight_.emplace(
+            a_request.client_order_id,
+            InFlightPlace{.candidate = std::move(candidate), .buffered_reports = {}});
     }
 
     // ---- venue routing (NO lock: a venue feed thread applying execution
@@ -353,8 +351,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
         const std::lock_guard lock(mutex_);
         const auto flying = in_flight_.find(a_request.client_order_id);
         if (flying == in_flight_.end()) {
-            return Error{"internal", "in-flight place vanished for " +
-                                         a_request.client_order_id};
+            return Error{"internal", "in-flight place vanished for " + a_request.client_order_id};
         }
         OrderRecord candidate = std::move(flying->second.candidate);
         std::vector<ExecutionReport> raced = std::move(flying->second.buffered_reports);
@@ -479,13 +476,12 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
 
         const auto limits = risk_.limits_for(record.symbol);
         if (limits.has_value()) {
-            const RiskOrder risk_order{.side = record.side,
-                                       .price = new_price,
-                                       .quantity = new_quantity,
-                                       .projected_position =
-                                           projected_position(record.symbol, &record,
-                                                              record.client_order_id, record.side,
-                                                              new_quantity)};
+            const RiskOrder risk_order{
+                .side = record.side,
+                .price = new_price,
+                .quantity = new_quantity,
+                .projected_position = projected_position(
+                    record.symbol, &record, record.client_order_id, record.side, new_quantity)};
             if (const auto rejection = check_risk(limits, record.symbol, risk_order)) {
                 return *rejection;
             }
@@ -539,11 +535,25 @@ auto OrderManagementSystem::query(std::string_view a_client_order_id) -> Result<
     return it->second;
 }
 
+auto OrderManagementSystem::all_orders() -> std::vector<OrderRecord>
+{
+    const std::lock_guard lock(mutex_);
+    std::vector<OrderRecord> records;
+    records.reserve(orders_.size());
+    for (const auto& [id, record] : orders_) {
+        records.push_back(record);
+    }
+    std::sort(records.begin(), records.end(),
+              [](const OrderRecord& a_lhs, const OrderRecord& a_rhs) {
+                  return a_lhs.client_order_id < a_rhs.client_order_id;
+              });
+    return records;
+}
+
 auto OrderManagementSystem::apply_observation(OrderRecord& a_record, OrderState a_state,
                                               std::string_view a_filled,
                                               std::string_view a_avg_price,
-                                              std::string_view a_price,
-                                              std::string_view a_quantity,
+                                              std::string_view a_price, std::string_view a_quantity,
                                               bool a_apply_lifecycle) -> bool
 {
     bool changed = false;
@@ -623,8 +633,8 @@ void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
     if (!a_report.exchange_order_id.empty() && !record.exchange_order_id.empty() &&
         a_report.exchange_order_id != record.exchange_order_id) {
         const auto& history = record.exchange_order_ids;
-        apply_lifecycle = std::find(history.begin(), history.end(), a_report.exchange_order_id) ==
-                          history.end();
+        apply_lifecycle =
+            std::find(history.begin(), history.end(), a_report.exchange_order_id) == history.end();
     }
 
     if (apply_observation(record, a_report.state, a_report.filled_quantity,
@@ -714,8 +724,7 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
         const std::lock_guard lock(mutex_);
         for (const auto& [id, record] : orders_) {
             if (!is_terminal(record.state)) {
-                const std::string& venue =
-                    record.venue.empty() ? default_venue_ : record.venue;
+                const std::string& venue = record.venue.empty() ? default_venue_ : record.venue;
                 open.push_back(WorkItem{id, venue, OrderQuery{id, record.symbol}});
             }
         }

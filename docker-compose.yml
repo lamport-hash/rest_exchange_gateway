@@ -4,11 +4,52 @@ services:
       context: .
     image: rest-exchange-gateway/dev:latest
     init: true
+    cap_add:
+      - SYS_PTRACE
     command: ["sleep", "infinity"]
     volumes:
       - .:/workspace/rest_exchange_gateway
       - build:/workspace/rest_exchange_gateway/build
       - ccache:/ccache
+
+  gateway:
+    image: rest-exchange-gateway/dev:latest
+    init: true
+    depends_on:
+      - dev
+    command: ["/workspace/rest_exchange_gateway/tools/run-gateway-app.sh"]
+    volumes:
+      - .:/workspace/rest_exchange_gateway
+      - build:/workspace/rest_exchange_gateway/build
+      - ccache:/ccache
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  ui:
+    image: rest-exchange-gateway/dev:latest
+    init: true
+    depends_on:
+      - gateway
+    working_dir: /workspace/rest_exchange_gateway
+    command:
+      [
+        "python3",
+        "-m",
+        "uvicorn",
+        "ui.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8090",
+      ]
+    volumes:
+      - .:/workspace/rest_exchange_gateway
+      - build:/workspace/rest_exchange_gateway/build
+      - ccache:/ccache
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
 
 volumes:
   build:

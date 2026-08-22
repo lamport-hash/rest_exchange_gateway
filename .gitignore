@@ -72,6 +72,10 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# python caches (ui/)
+__pycache__/
+*.pyc
+
 # live credentials (never commit)
 config/gateway.json
 config/*.local.json

@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         ninja-build \
         openssl \
+        python3-fastapi \
+        python3-uvicorn \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
