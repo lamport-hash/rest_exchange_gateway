@@ -232,10 +232,21 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
 {
     a_app.exception_handler([](crow::response& a_res) { a_res = internal_error_response(); });
 
-    // ---- POST /orders: place -------------------------------------------
+    // ---- /orders: POST place, GET registry listing ----------------------
+    // One rule with both methods (Crow's trie rejects a duplicate URL) —
+    // the handler dispatches on the request method.
     CROW_ROUTE(a_app, "/orders")
-        .methods(crow::HTTPMethod::POST)([&a_oms](const crow::request& a_req) -> crow::response {
+        .methods(crow::HTTPMethod::POST,
+                 crow::HTTPMethod::GET)([&a_oms](const crow::request& a_req) -> crow::response {
             try {
+                if (a_req.method == crow::HTTPMethod::GET) {
+                    nlohmann::json orders = nlohmann::json::array();
+                    for (const auto& record : a_oms.all_orders()) {
+                        orders.push_back(record_json(record));
+                    }
+                    return json_response(200, {{"orders", std::move(orders)}});
+                }
+
                 crow::response parse_error;
                 const auto body = parse_json_body(a_req, parse_error);
                 if (!body.has_value()) {

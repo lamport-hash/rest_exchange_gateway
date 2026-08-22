@@ -5,7 +5,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -251,4 +254,50 @@ TEST_CASE("SymbolTranslator converts gateway and wire symbols both ways")
         (void)symbols.to_wire("ETH-BTC");
         CHECK(symbols.to_gateway("ETHBTC") == "ETH-BTC");
     }
+}
+
+TEST_CASE("SymbolTranslator is safe under concurrent REST and feed traffic")
+{
+    // The connector calls from crow workers (to_wire) and the feed notifier
+    // thread (to_gateway) simultaneously; the memo maps must not corrupt.
+    SymbolTranslator symbols;
+    constexpr int kThreadsPerDirection = 4;
+    constexpr int kIterations = 500;
+
+    const auto hammer_wire = [&symbols](int a_offset) {
+        for (int i = 0; i < kIterations; ++i) {
+            const std::string base = std::string("SYM") + std::to_string(a_offset);
+            (void)symbols.to_wire(base + "-USDT");
+        }
+    };
+    const auto hammer_gateway = [&symbols](int a_offset) {
+        // Memo (from a racing to_wire) and the quote-suffix heuristic both
+        // split identically, so the result is stable regardless of ordering.
+        for (int i = 0; i < kIterations; ++i) {
+            const std::string wire = std::string("SYM") + std::to_string(a_offset) + "USDT";
+            const auto expected = std::string("SYM") + std::to_string(a_offset) + "-USDT";
+            if (symbols.to_gateway(wire) != expected) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    std::vector<std::thread> threads;
+    std::atomic<bool> consistent{true};
+    for (int t = 0; t < kThreadsPerDirection; ++t) {
+        threads.emplace_back([&, t] { hammer_wire(t); });
+        threads.emplace_back([&, t] {
+            if (!hammer_gateway(t)) {
+                consistent = false;
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    CHECK(consistent.load());
+    // After the hammer, every direction must be stable.
+    CHECK(symbols.to_wire("SYM0-USDT") == "SYM0USDT");
+    CHECK(symbols.to_gateway("SYM1USDT") == "SYM1-USDT");
 }

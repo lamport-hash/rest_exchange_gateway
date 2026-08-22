@@ -163,6 +163,10 @@ class OrderManagementSystem
     /// Registry lookup (copy). Errors: "not_found". Serves the REST GET.
     [[nodiscard]] auto query(std::string_view a_client_order_id) -> Result<OrderRecord>;
 
+    /// Registry snapshot (copies), sorted by clientOrderId for a stable
+    /// listing. Serves the REST collection GET.
+    [[nodiscard]] auto all_orders() -> std::vector<OrderRecord>;
+
     [[nodiscard]] auto stats() const -> OmsStats;
 
     /// Execution-report sink (connector worker threads).
@@ -193,8 +197,7 @@ class OrderManagementSystem
     /// ids): only the monotonic fill high-water mark is applied.
     auto apply_observation(OrderRecord& a_record, OrderState a_state, std::string_view a_filled,
                            std::string_view a_avg_price, std::string_view a_price = "",
-                           std::string_view a_quantity = "",
-                           bool a_apply_lifecycle = true) -> bool;
+                           std::string_view a_quantity = "", bool a_apply_lifecycle = true) -> bool;
 
     /// Adopt/reject/... helpers shared by reconcile and replay.
     void record_from_snapshot(const OrderSnapshot& a_snapshot, const std::string& a_venue,

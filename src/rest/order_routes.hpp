@@ -8,6 +8,7 @@ namespace gateway::rest {
 
 /// Register the complete client-facing API on a_app:
 ///   POST   /orders            place (common schema, strict field allowlist)
+///   GET    /orders            registry listing (all orders, by clientOrderId)
 ///   GET    /orders/{id}       registry view (OMS state)
 ///   DELETE /orders/{id}       cancel (idempotent)
 ///   PUT    /orders/{id}       amend (price and/or quantity)

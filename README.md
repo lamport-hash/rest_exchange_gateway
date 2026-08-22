@@ -7,6 +7,8 @@ cpp-httplib, nlohmann/json, doctest.
 
 Spec: `doc/project-spec.md` — Architecture: `doc/project-archi.md` —
 Plan: `doc/implementation-plan.md` / `implement-todos.md`.
+API reference + diagrams: `doc/api.md` — code review vs spec:
+`doc/code-review.md` — remaining work: `doc/feature-backlog.md`.
 
 ## Architecture
 
@@ -65,9 +67,11 @@ POST /orders
 - Normalized states: `live`, `partially_filled`, `filled`, `canceled`,
   `rejected` — venue spellings map through explicit per-adapter tables
   (Binance `EXPIRED`/`EXPIRED_IN_MATCH`/`PENDING_CANCEL` → canceled, etc.).
-- Full REST surface: `POST /orders`, `GET /orders/{id}`, `DELETE /orders/{id}`
+- Full REST surface: `POST /orders`, `GET /orders` (registry listing),
+  `GET /orders/{id}`, `DELETE /orders/{id}`
   (idempotent), `PUT /orders/{id}` (amend), `GET /health`.
   Errors are always `{"error":{"code","reason","clientOrderId"}}`.
+  Endpoint-by-endpoint reference: `doc/api.md`.
 
 ## Adapter design (OKX vs Binance)
 
@@ -237,6 +241,33 @@ tests/live/live_func_tests.sh okx            # OKX demo trading
 tests/live/live_func_tests.sh binance        # Binance spot testnet
                                              # runbook: doc/exchanges_func.md
 ```
+
+## Monitor UI + test launcher (compose apps)
+
+Besides the `dev` container, compose runs the gateway and a small web UI as
+apps sharing the same image, source tree, and build volume:
+
+```bash
+docker compose up -d                         # dev + gateway + ui
+# UI:      http://localhost:8090
+# Gateway: http://localhost:8080  (config/gateway.json.secret)
+```
+
+- **`gateway` service** — builds `build/release/gateway` on first start
+  (`tools/run-gateway-app.sh`), then runs it with `config/gateway.json.secret`;
+  stdout is mirrored to `data/gateway-stdout.jsonl` for the UI event ticker.
+  Stop it (`docker compose stop gateway`) before `examples/run_gateway.sh`
+  to avoid competing for port 8080.
+- **`ui` service** — FastAPI backend (`ui/app.py`) + one static page
+  (`ui/static/`). Top panel: gateway health badge, WS feed state (derived
+  from `reconcile` / `feed_disconnected` events), OMS stats, event ticker,
+  and the orders table (the `GET /orders` registry listing, refreshed every
+  2s). Below: a large test table — all 21 ctest suites in both presets
+  (debug = ASan+UBSan), the black-box rig, and the live venue suites, each
+  with a Run button, live log tail, parsed outcome summary and duration.
+  Tests execute in the UI container, one at a time (the suites claim fixed
+  ports); live rows ask for confirmation because they spend demo/testnet
+  funds. Run history persists under `data/ui-runs/`.
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
 

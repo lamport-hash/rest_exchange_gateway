@@ -305,6 +305,62 @@ TEST_CASE("place and fetch an order end-to-end through the OMS")
     CHECK(gets == 0);
 }
 
+TEST_CASE("GET /orders lists the registry sorted by clientOrderId")
+{
+    GatewayFixture fixture;
+
+    const auto empty = fixture.client().Get("/orders");
+    REQUIRE(empty != nullptr);
+    REQUIRE(empty->status == 200);
+    const auto empty_body = nlohmann::json::parse(empty->body);
+    REQUIRE(empty_body["orders"].is_array());
+    CHECK(empty_body["orders"].empty());
+
+    REQUIRE(
+        fixture.client()
+            .Post(
+                "/orders",
+                R"({"clientOrderId":"gw0002","symbol":"BTC-USDT","side":"sell","type":"limit","price":"51000","quantity":"0.002"})",
+                "application/json")
+            ->status == 201);
+    REQUIRE(fixture.client().Post("/orders", kPlaceBody, "application/json")->status == 201);
+    REQUIRE(
+        fixture.client()
+            .Post(
+                "/orders",
+                R"({"clientOrderId":"gw0003","venue":"binance","symbol":"BTC-USDT","side":"buy","type":"limit","price":"49000","quantity":"0.003"})",
+                "application/json")
+            ->status == 201);
+
+    const auto list = fixture.client().Get("/orders");
+    REQUIRE(list != nullptr);
+    REQUIRE(list->status == 200);
+    const auto body = nlohmann::json::parse(list->body);
+    const auto& orders = body["orders"];
+    REQUIRE(orders.size() == 3);
+    // sorted by clientOrderId regardless of placement order
+    CHECK(orders[0]["clientOrderId"] == "gw0001");
+    CHECK(orders[1]["clientOrderId"] == "gw0002");
+    CHECK(orders[2]["clientOrderId"] == "gw0003");
+    // full record shape, same as the per-id GET
+    CHECK(orders[0]["exchangeOrderId"] == "mock-2"); // venue ids follow placement order
+    CHECK(orders[0]["state"] == "live");
+    CHECK(orders[0]["symbol"] == "BTC-USDT");
+    CHECK(orders[0]["venue"] == "okx");
+    CHECK(orders[0]["side"] == "buy");
+    CHECK(orders[0]["price"] == "50000");
+    CHECK(orders[0]["quantity"] == "0.001");
+    CHECK(orders[0]["filledQuantity"] == "0");
+    CHECK(orders[2]["venue"] == "binance");
+
+    // the listing is a snapshot of live registry state
+    fixture.push_update("gw0001", "canceled", "0");
+    REQUIRE(fixture.wait_for_state("gw0001", "canceled"));
+    const auto after = nlohmann::json::parse(fixture.client().Get("/orders")->body);
+    CHECK(after["orders"].size() == 3);
+    CHECK(after["orders"][0]["state"] == "canceled");
+}
+
 TEST_CASE("execution reports from the venue feed keep the registry current")
 {
     GatewayFixture fixture;

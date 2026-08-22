@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>REST exchange gateway — monitor</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">rest_exchange_gateway</div>
+    <div id="gateway-badge" class="badge unknown">gateway: …</div>
+    <div id="feed-badge" class="badge unknown">feed: …</div>
+    <div id="om-stats" class="muted">knownOrders – reportsApplied – reportsStale</div>
+    <div id="clock" class="muted"></div>
+  </header>
+
+  <section id="events">
+    <span class="label">recent events</span>
+    <div id="event-ticker" class="muted">–</div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Orders</h2>
+      <span id="orders-count" class="muted"></span>
+    </div>
+    <table id="orders-table">
+      <thead>
+        <tr>
+          <th>clientOrderId</th><th>venue</th><th>symbol</th><th>side</th>
+          <th>type</th><th>price</th><th>qty</th><th>filled</th>
+          <th>avg fill</th><th>exchangeOrderId</th><th>state</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="orders-empty" class="muted">no orders known to the gateway</div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Tests</h2>
+      <div class="runall">
+        <button data-group="debug">Run all (debug)</button>
+        <button data-group="release">Run all (release)</button>
+        <button data-group="blackbox">Run blackbox</button>
+      </div>
+    </div>
+    <table id="tests-table">
+      <thead>
+        <tr>
+          <th></th><th>suite</th><th>preset</th><th>type</th>
+          <th>spec coverage</th><th class="col-outcome">outcome</th>
+          <th>duration</th><th>log</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

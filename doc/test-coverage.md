@@ -17,6 +17,7 @@ Test locations:
 | Spec requirement | Live suite | Unit / blackbox tests |
 |---|---|---|
 | Exchange-agnostic REST schema | 2, 11 | `rest_api_test.cpp` |
+| Order registry listing (`GET /orders`) | — (3) | `rest_api_test.cpp`, `oms_test.cpp` |
 | Client must not send exchange-specific fields (rejected) | 11 | `rest_api_test.cpp` |
 | New order — Limit | 2, 15, 17 | `okx_connector_test.cpp`, blackbox |
 | New order — Market (happy path) | 15 | `rest_api_test.cpp`, `okx_wire_test.cpp` |
@@ -51,6 +52,7 @@ Notes:
 
 1. Not testable against the live venue (would require killing or fault-injecting the venue's servers, or non-deterministic partial fills). Covered by the deterministic rigs in `tests/` and `tests/blackbox/`.
 2. The live suite exercises idempotent replay of client requests; duplicate WS report *handling* is covered deterministically in `oms_test.cpp`.
+3. Added for the monitor UI (compose `ui` service); plain registry snapshot, no venue interaction.
 
 ## Unit test scope (summary)
 

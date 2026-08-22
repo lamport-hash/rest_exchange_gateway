@@ -132,11 +132,13 @@ auto main(int a_argc, char* a_argv[]) -> int
                                      {"averageFillPrice", a_report.average_fill_price}};
         std::cout << line.dump() << '\n' << std::flush;
     };
-    okx_connector->set_execution_report_handler(
-        [&oms, &execution_report_line](const gateway::ExecutionReport& a_report) {
-            oms.on_execution_report(a_report);
-            execution_report_line(a_report);
-        });
+    if (okx_connector.has_value()) {
+        okx_connector->set_execution_report_handler(
+            [&oms, &execution_report_line](const gateway::ExecutionReport& a_report) {
+                oms.on_execution_report(a_report);
+                execution_report_line(a_report);
+            });
+    }
     if (binance_connector.has_value()) {
         binance_connector->set_execution_report_handler(
             [&oms, &execution_report_line](const gateway::ExecutionReport& a_report) {
@@ -158,7 +160,9 @@ auto main(int a_argc, char* a_argv[]) -> int
             std::cout << reconcile_summary_line(report).dump() << '\n' << std::flush;
         });
     };
-    install_connectivity(okx_connector.value());
+    if (okx_connector.has_value()) {
+        install_connectivity(okx_connector.value());
+    }
     if (binance_connector.has_value()) {
         install_connectivity(binance_connector.value());
     }
@@ -167,7 +171,9 @@ auto main(int a_argc, char* a_argv[]) -> int
     gateway::rest::register_order_routes(app, oms);
 
     const auto start_venue = [](gateway::ExchangeConnector& a_connector) { a_connector.start(); };
-    start_venue(okx_connector.value());
+    if (okx_connector.has_value()) {
+        start_venue(okx_connector.value());
+    }
     if (binance_connector.has_value()) {
         start_venue(binance_connector.value());
     }
@@ -188,7 +194,9 @@ auto main(int a_argc, char* a_argv[]) -> int
     app.port(config.value().rest_port).concurrency(2).loglevel(crow::LogLevel::Warning).run();
 
     const auto stop_venue = [](gateway::ExchangeConnector& a_connector) { a_connector.stop(); };
-    stop_venue(okx_connector.value());
+    if (okx_connector.has_value()) {
+        stop_venue(okx_connector.value());
+    }
     if (binance_connector.has_value()) {
         stop_venue(binance_connector.value());
     }

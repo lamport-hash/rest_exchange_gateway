@@ -239,6 +239,7 @@ auto SymbolTranslator::to_wire(const std::string& a_gateway_symbol) -> std::stri
             wire += c;
         }
     }
+    const std::lock_guard lock{mutex_};
     gateway_to_wire_[a_gateway_symbol] = wire;
     wire_to_gateway_[wire] = a_gateway_symbol;
     return wire;
@@ -247,6 +248,7 @@ auto SymbolTranslator::to_wire(const std::string& a_gateway_symbol) -> std::stri
 auto SymbolTranslator::to_gateway(std::string_view a_wire_symbol) -> std::string
 {
     const std::string wire{a_wire_symbol};
+    const std::lock_guard lock{mutex_};
     if (const auto it = wire_to_gateway_.find(wire); it != wire_to_gateway_.end()) {
         return it->second;
     }

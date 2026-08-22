@@ -189,3 +189,16 @@ working code, second exchange last. Source of truth: doc/project-spec.md.
       through the single unified API
       (2026-08-20: met for OKX (live demo + mock suites); Binance verified
       against the doc-faithful mock (testnet needs user keys in config)
+
+## Post-delivery review (2026-08-22)
+- [x] Full code review vs spec: `doc/code-review.md` (compliance matrix +
+      severity-ordered findings; 2 critical bugs found and fixed:
+      SymbolTranslator data race, unguarded okx_connector optional deref)
+- [x] API reference + mermaid diagrams: `doc/api.md` (endpoints, schemas,
+      error envelope, state machine, place idempotency + restart-recovery
+      sequences); architecture diagram in `doc/project-archi.md`
+- [x] GET /orders registry listing finished and documented (sorted
+      snapshot, no pagination yet — see backlog)
+- [x] Prioritized remaining work: `doc/feature-backlog.md` (P1 robustness
+      fixes, P2 spec deviations, P3 stretch goals, hygiene)
+      Verification: ctest debug (ASan+UBSan) 21/21 + release 21/21
