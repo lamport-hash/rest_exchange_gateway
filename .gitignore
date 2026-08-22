@@ -80,6 +80,9 @@ __pycache__/
 config/gateway.json
 config/*.local.json
 
+# edge allowlist (never commit)
+.env
+
 
 # runtime gateway output (default persistence path)
 data/

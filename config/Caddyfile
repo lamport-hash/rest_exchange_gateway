@@ -1,0 +1,23 @@
+# Internet edge for the gateway + monitor UI (compose "edge" service).
+#
+# Plain HTTP by choice (no domain -> no clean TLS); the allowlist in
+# .env (ALLOWED_IPS, space-separated) is the access control. Private
+# ranges below stay allowed: host-local docker traffic (curl, example
+# scripts, test rigs) arrives via the docker bridge, not from the
+# internet.
+
+{
+	auto_https off
+}
+
+:8080 {
+	@denied not remote_ip {$ALLOWED_IPS} 172.16.0.0/12 127.0.0.1
+	respond @denied 403
+	reverse_proxy gateway:8080
+}
+
+:8090 {
+	@denied not remote_ip {$ALLOWED_IPS} 172.16.0.0/12 127.0.0.1
+	respond @denied 403
+	reverse_proxy ui:8090
+}

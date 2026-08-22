@@ -248,16 +248,28 @@ Besides the `dev` container, compose runs the gateway and a small web UI as
 apps sharing the same image, source tree, and build volume:
 
 ```bash
-docker compose up -d                         # dev + gateway + ui
-# UI:      http://localhost:8090
-# Gateway: http://localhost:8080  (config/gateway.json.secret)
+docker compose up -d                         # dev + gateway + ui + edge
+# UI:      http://<host>:8090
+# Gateway: http://<host>:8080  (config/gateway.json.secret)
 ```
+
+- **`edge` service** — the only component with published ports
+  (8080/8090): Caddy drops (`403`) every request whose source IP is not
+  in the allowlist, then reverse-proxies to `gateway`/`ui`, which are
+  otherwise compose-internal. The allowlist lives in the gitignored
+  `.env` (`ALLOWED_IPS=1.2.3.4 5.6.7.8`, space-separated); change it
+  with `docker compose up -d edge` afterwards. Private ranges
+  (`172.16.0.0/12`, `127.0.0.1`) stay allowed so host-side curl,
+  `examples/*.sh` and the test rigs keep working. Traffic is plain
+  HTTP by choice (no domain → no clean TLS) — fine for demo/testnet
+  use; for anything sensitive put TLS + auth in front (Caddy
+  `basic_auth` + `tls internal`, or a domain + Let's Encrypt).
 
 - **`gateway` service** — builds `build/release/gateway` on first start
   (`tools/run-gateway-app.sh`), then runs it with `config/gateway.json.secret`;
   stdout is mirrored to `data/gateway-stdout.jsonl` for the UI event ticker.
-  Stop it (`docker compose stop gateway`) before `examples/run_gateway.sh`
-  to avoid competing for port 8080.
+  Stop it and the edge (`docker compose stop gateway edge`) before
+  `examples/run_gateway.sh` to avoid competing for port 8080.
 - **`ui` service** — FastAPI backend (`ui/app.py`) + one static page
   (`ui/static/`), organized in tabs: **Monitor** (health badge, WS feed
   state derived from `reconcile` / `feed_disconnected` events, OMS stats,
