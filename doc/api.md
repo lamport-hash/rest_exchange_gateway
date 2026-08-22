@@ -135,7 +135,7 @@ stateDiagram-v2
     Live --> PartiallyFilled : partial fill
     Live --> Filled : full fill
     Live --> Canceled : cancel ack
-    Live --> Rejected : reconcile: venue absent
+    Live --> Rejected : reconcile - venue absent
     PartiallyFilled --> PartiallyFilled : more fills (monotonic)
     PartiallyFilled --> Filled : full fill
     PartiallyFilled --> Canceled : cancel ack
@@ -209,5 +209,5 @@ sequenceDiagram
     O->>O: adopt venue-live unknown orders
     O->>O: refresh fills, resolve non-terminal
     O->>O: venue-absent -> Rejected / unreachable -> kept, warned
-    G->>G: serve REST; reconcile again on every WS reconnect
+    G->>G: serve REST, reconcile again on every WS reconnect
 ```

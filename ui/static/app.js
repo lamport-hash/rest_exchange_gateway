@@ -322,15 +322,26 @@ async function renderDiagrams() {
   }
   try {
     window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
-    for (const node of nodes) {
-      const { svg } = await window.mermaid.render(`m-${node.id}`, node.textContent);
-      const holder = document.createElement("div");
-      holder.className = "diagram";
-      holder.innerHTML = svg;
-      node.replaceWith(holder);
-    }
   } catch {
     nodes.forEach((n) => n.classList.add("mermaid-fallback"));
+    return;
+  }
+  for (const node of nodes) {
+    const holder = document.createElement("div");
+    holder.className = "diagram";
+    try {
+      node.after(holder);
+      // Passing the holder as render container keeps mermaid's temp/error
+      // elements inside it — a parse failure can never leak a "Syntax
+      // error ... mermaid version" block into the page body.
+      const { svg } = await window.mermaid.render(`m-${node.id}`, node.textContent, holder);
+      holder.innerHTML = svg;
+      node.remove();
+    } catch {
+      // keep the raw source visible instead of a broken/blank diagram
+      holder.remove();
+      node.classList.add("mermaid-fallback");
+    }
   }
 }
 

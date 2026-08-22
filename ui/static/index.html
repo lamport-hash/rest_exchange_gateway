@@ -177,7 +177,7 @@ curl -s localhost:8080/health</pre>
     Live --> PartiallyFilled : partial fill
     Live --> Filled : full fill
     Live --> Canceled : cancel ack
-    Live --> Rejected : reconcile: venue absent
+    Live --> Rejected : reconcile - venue absent
     PartiallyFilled --> PartiallyFilled : more fills (monotonic)
     PartiallyFilled --> Filled : full fill
     PartiallyFilled --> Canceled : cancel ack
@@ -247,7 +247,7 @@ curl -s localhost:8080/health</pre>
     O->>O: adopt venue-live unknown orders
     O->>O: refresh fills, resolve non-terminal
     O->>O: venue-absent -> Rejected / unreachable -> kept, warned
-    G->>G: serve REST; reconcile again on every WS reconnect</pre>
+    G->>G: serve REST, reconcile again on every WS reconnect</pre>
     </section>
   </div>
 
