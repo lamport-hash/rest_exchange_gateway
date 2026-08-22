@@ -68,6 +68,10 @@ class BinanceMockWsServer
     /// becomes PARTIALLY_FILLED or FILLED when fully executed.
     void apply_fill(const std::string& a_client_order_id, const std::string& a_qty,
                     const std::string& a_px);
+    /// "ticker.price" serves this WIRE symbol at this price (defaults
+    /// BTCUSDT @ 50000); any other symbol is rejected with -1121 like
+    /// live Binance ("Invalid symbol.").
+    void set_ticker(const std::string& a_wire_symbol, const std::string& a_price);
     /// Process the next request normally but drop its response: the
     /// outcome happened, the acknowledgement is lost (one-shot).
     void set_drop_next_response();
@@ -167,6 +171,8 @@ class BinanceMockWsServer
     std::vector<Session*> sessions_;
     Stats stats_;
     FillMode fill_mode_ = FillMode::None;
+    std::string ticker_symbol_ = "BTCUSDT";
+    std::string ticker_price_ = "50000";
     bool drop_next_response_ = false;
     unsigned delay_next_ms_ = 0;
     bool ignore_signature_ = false;

@@ -167,6 +167,13 @@ void OkxMockServer::set_fill_mode(FillMode a_mode)
     fill_mode_ = a_mode;
 }
 
+void OkxMockServer::set_ticker(const std::string& a_inst_id, const std::string& a_last_price)
+{
+    const std::lock_guard lock(mutex_);
+    ticker_inst_id_ = a_inst_id;
+    ticker_last_ = a_last_price;
+}
+
 void OkxMockServer::apply_fill(const std::string& a_cl_ord_id, const std::string& a_qty,
                                const std::string& a_px)
 {
@@ -591,6 +598,35 @@ void OkxMockServer::register_routes(httplib::Server& a_server)
                      const nlohmann::json body = {{"code", "0"}, {"msg", ""}, {"data", data}};
                      res.set_content(body.dump(), "application/json");
                  });
+
+    // GET /api/v5/market/ticker: PUBLIC market data (no auth headers);
+    // serves the scripted instrument/price, rejects others with 51001
+    // like live OKX ("Instrument ID does not exist").
+    a_server.Get("/api/v5/market/ticker", [this](const httplib::Request& req,
+                                                 httplib::Response& res) {
+        if (begin_request(req, "", res)) {
+            return;
+        }
+
+        const std::string inst_id = req.get_param_value("instId");
+        if (inst_id.empty()) {
+            res.set_content(envelope_error("51000", "Parameter error: instId"), "application/json");
+            return;
+        }
+
+        const std::lock_guard lock(mutex_);
+        if (inst_id != ticker_inst_id_) {
+            res.set_content(envelope_error("51001", "Instrument ID does not exist"),
+                            "application/json");
+            return;
+        }
+        nlohmann::json item = {{"instId", ticker_inst_id_},
+                               {"last", ticker_last_},
+                               {"askPx", ticker_last_},
+                               {"bidPx", ticker_last_},
+                               {"ts", "1700000000000"}};
+        res.set_content(envelope_ok() + item.dump() + "]}", "application/json");
+    });
 }
 
 } // namespace gateway::testing

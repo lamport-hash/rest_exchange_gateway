@@ -81,6 +81,10 @@ class OkxRestClient
     /// (single page; OKX returns up to 100 — documented limitation).
     [[nodiscard]] auto get_orders_pending() const -> Result<std::vector<OkxOrderInfo>>;
 
+    /// GET /api/v5/market/ticker (public, unsigned): last-traded price of
+    /// an instrument, verbatim decimal string.
+    [[nodiscard]] auto get_ticker(const std::string& a_instrument_id) const -> Result<std::string>;
+
   private:
     [[nodiscard]] auto signed_request(const char* a_method, const std::string& a_path,
                                       const std::string& a_body) const -> Result<nlohmann::json>;

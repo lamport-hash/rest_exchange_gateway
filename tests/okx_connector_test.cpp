@@ -632,4 +632,24 @@ TEST_CASE("start is a no-op when the ws feed is disabled")
     CHECK(server.recorded_requests().empty());
 }
 
+TEST_CASE("get_price serves public market data through the connector interface")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    server.set_ticker("BTC-USDT", "61750.5");
+    auto connector = make_connector(server);
+    ExchangeConnector& connector_interface = connector;
+
+    const auto price = connector_interface.get_price("BTC-USDT");
+    REQUIRE(price.is_ok());
+    CHECK(price.value() == "61750.5");
+
+    SUBCASE("unknown instrument surfaces the venue error")
+    {
+        const auto bad = connector_interface.get_price("NOPE-USDT");
+        REQUIRE_FALSE(bad.is_ok());
+        CHECK(bad.error().code == "venue:51001");
+    }
+}
+
 } // namespace

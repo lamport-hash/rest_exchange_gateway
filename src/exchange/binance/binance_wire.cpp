@@ -133,6 +133,23 @@ auto build_open_orders_params() -> nlohmann::json
     return nlohmann::json::object();
 }
 
+auto build_ticker_price_params(const std::string& a_wire_symbol) -> nlohmann::json
+{
+    return nlohmann::json{{"symbol", a_wire_symbol}};
+}
+
+auto parse_ticker_price(const nlohmann::json& a_result) -> Result<std::string>
+{
+    if (!a_result.is_object()) {
+        return Error{"protocol", "ticker.price result is not an object"};
+    }
+    const std::string price = string_field(a_result, "price");
+    if (price.empty()) {
+        return Error{"protocol", "ticker.price result missing string field \"price\""};
+    }
+    return price;
+}
+
 auto parse_order_ack(const nlohmann::json& a_result) -> BinanceOrderAck
 {
     return BinanceOrderAck{.order_id = number_field(a_result, "orderId"),

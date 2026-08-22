@@ -64,6 +64,14 @@ struct AmendCommand
     std::optional<std::string> new_quantity;
 };
 
+/// Last-traded price of an instrument as served by one venue. venue is
+/// the RESOLVED venue key (filled in when the request omitted it).
+struct PriceQuote
+{
+    std::string venue;
+    std::string price;
+};
+
 struct ReconcileReport
 {
     int adopted = 0;           // venue-live orders adopted into the registry
@@ -166,6 +174,13 @@ class OrderManagementSystem
     /// Registry snapshot (copies), sorted by clientOrderId for a stable
     /// listing. Serves the REST collection GET.
     [[nodiscard]] auto all_orders() -> std::vector<OrderRecord>;
+
+    /// Last-traded price of a_symbol from a_venue (empty -> default
+    /// venue). Pure venue read (public market data) — no registry state,
+    /// no registry lock. Errors: "invalid_request" (unknown venue) plus
+    /// the connector's transport/protocol/venue codes.
+    [[nodiscard]] auto get_price(const std::string& a_symbol,
+                                 std::string_view a_venue = {}) -> Result<PriceQuote>;
 
     [[nodiscard]] auto stats() const -> OmsStats;
 

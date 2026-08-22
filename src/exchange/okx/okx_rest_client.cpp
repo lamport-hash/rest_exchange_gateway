@@ -15,6 +15,7 @@ constexpr const char* kPathCancel = "/api/v5/trade/cancel-order";
 constexpr const char* kPathAmend = "/api/v5/trade/amend-order";
 constexpr const char* kPathOrderInfo = "/api/v5/trade/order";
 constexpr const char* kPathOrdersPending = "/api/v5/trade/orders-pending";
+constexpr const char* kPathTicker = "/api/v5/market/ticker";
 
 auto string_field(const nlohmann::json& a_node, const char* a_name) -> std::optional<std::string>
 {
@@ -23,6 +24,36 @@ auto string_field(const nlohmann::json& a_node, const char* a_name) -> std::opti
         return it->get<std::string>();
     }
     return std::nullopt;
+}
+
+/// Validate the OKX envelope ({code, msg, data}); non-"0" codes become
+/// "venue:<code>" errors. Shared by signed and public requests.
+auto parse_envelope(const std::string& a_body, const std::string& a_path) -> Result<nlohmann::json>
+{
+    const auto envelope = nlohmann::json::parse(a_body, nullptr, false);
+    if (envelope.is_discarded() || !envelope.is_object()) {
+        return Error{"protocol", "response is not a JSON object: " + a_body};
+    }
+
+    const auto code = string_field(envelope, "code");
+    if (!code.has_value()) {
+        return Error{"protocol", "envelope missing string field \"code\""};
+    }
+    if (*code != "0") {
+        const auto msg = string_field(envelope, "msg").value_or("");
+        std::string detail = msg;
+        if (envelope.contains("data") && envelope.at("data").is_array() &&
+            !envelope.at("data").empty() && envelope.at("data").front().is_object()) {
+            const auto& front = envelope.at("data").front();
+            detail += " [" + string_field(front, "sCode").value_or("") + ": " +
+                      string_field(front, "sMsg").value_or("") + "]";
+        }
+        return Error{"venue:" + *code, "OKX rejected " + a_path + ": " + detail};
+    }
+    if (!envelope.contains("data") || !envelope.at("data").is_array()) {
+        return Error{"protocol", "envelope missing \"data\" array"};
+    }
+    return envelope;
 }
 
 template <typename ClientT>
@@ -210,32 +241,8 @@ auto OkxRestClient::signed_request(const char* a_method, const std::string& a_pa
                                       " from " + a_path};
     }
 
-    const auto envelope = nlohmann::json::parse(result->body, nullptr, false);
-    if (envelope.is_discarded() || !envelope.is_object()) {
-        return Error{"protocol", "response is not a JSON object: " + result->body};
-    }
-
-    const auto code = string_field(envelope, "code");
-    if (!code.has_value()) {
-        return Error{"protocol", "envelope missing string field \"code\""};
-    }
-    if (*code != "0") {
-        const auto msg = string_field(envelope, "msg").value_or("");
-        std::string detail = msg;
-        if (envelope.contains("data") && envelope.at("data").is_array() &&
-            !envelope.at("data").empty() && envelope.at("data").front().is_object()) {
-            const auto& front = envelope.at("data").front();
-            detail += " [" + string_field(front, "sCode").value_or("") + ": " +
-                      string_field(front, "sMsg").value_or("") + "]";
-        }
-        return Error{"venue:" + *code, "OKX rejected " + std::string(a_path) + ": " + detail};
-    }
-    if (!envelope.contains("data") || !envelope.at("data").is_array()) {
-        return Error{"protocol", "envelope missing \"data\" array"};
-    }
-    return envelope;
+    return parse_envelope(result->body, a_path);
 }
-
 auto OkxRestClient::place_order(const OkxPlaceRequest& a_request) const -> Result<OkxOrderAck>
 {
     const auto envelope = signed_request("POST", kPathPlace, to_json(a_request).dump());
@@ -315,6 +322,35 @@ auto OkxRestClient::get_orders_pending() const -> Result<std::vector<OkxOrderInf
         pending.push_back(parse_order_info(item));
     }
     return pending;
+}
+
+auto OkxRestClient::get_ticker(const std::string& a_instrument_id) const -> Result<std::string>
+{
+    // Public market-data endpoint: no OK-ACCESS-* headers, no signing.
+    const std::string path = std::string(kPathTicker) + "?instId=" + a_instrument_id;
+    const auto result = config_.use_tls
+                            ? perform_request<httplib::SSLClient>(config_, "GET", path, {}, "")
+                            : perform_request<httplib::Client>(config_, "GET", path, {}, "");
+    if (result == nullptr) {
+        return Error{"transport", "network failure talking to " + config_.host};
+    }
+    if (result->status != 200) {
+        return Error{"transport",
+                     "unexpected HTTP status " + std::to_string(result->status) + " from " + path};
+    }
+    const auto envelope = parse_envelope(result->body, kPathTicker);
+    if (!envelope.is_ok()) {
+        return envelope.error();
+    }
+    const auto& data = envelope.value().at("data");
+    if (data.empty() || !data.front().is_object()) {
+        return Error{"protocol", "ticker data[0] is missing or not an object"};
+    }
+    const auto last = string_field(data.front(), "last");
+    if (!last.has_value()) {
+        return Error{"protocol", "ticker data[0] missing string field \"last\""};
+    }
+    return *last;
 }
 
 } // namespace gateway::exchange::okx

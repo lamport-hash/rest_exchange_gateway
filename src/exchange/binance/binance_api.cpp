@@ -105,4 +105,16 @@ auto BinanceApi::get_open_orders() -> Result<std::vector<BinanceOrderInfo>>
     return orders;
 }
 
+auto BinanceApi::get_price(const std::string& a_wire_symbol) -> Result<std::string>
+{
+    if (!public_call_) {
+        return Error{"protocol", "no public call transport configured for ticker.price"};
+    }
+    const auto result = public_call_("ticker.price", build_ticker_price_params(a_wire_symbol));
+    if (!result.is_ok()) {
+        return result.error();
+    }
+    return parse_ticker_price(result.value());
+}
+
 } // namespace gateway::exchange::binance

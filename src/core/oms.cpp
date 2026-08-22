@@ -550,6 +550,29 @@ auto OrderManagementSystem::all_orders() -> std::vector<OrderRecord>
     return records;
 }
 
+auto OrderManagementSystem::get_price(const std::string& a_symbol,
+                                      std::string_view a_venue) -> Result<PriceQuote>
+{
+    const std::string venue{a_venue.empty() ? default_venue_ : std::string{a_venue}};
+    const auto connector = connector_for(venue);
+    if (connector == nullptr) {
+        std::string names;
+        for (const auto& [key, entry] : connectors_) {
+            if (!names.empty()) {
+                names += ", ";
+            }
+            names += key;
+        }
+        return Error{"invalid_request",
+                     "unsupported venue \"" + venue + "\" (configured: " + names + ")"};
+    }
+    const auto price = connector->get_price(a_symbol);
+    if (!price.is_ok()) {
+        return price.error();
+    }
+    return PriceQuote{.venue = venue, .price = price.value()};
+}
+
 auto OrderManagementSystem::apply_observation(OrderRecord& a_record, OrderState a_state,
                                               std::string_view a_filled,
                                               std::string_view a_avg_price,

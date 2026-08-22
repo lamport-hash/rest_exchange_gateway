@@ -46,10 +46,14 @@ class BinanceApi
   public:
     /// a_call: (method, params) -> "result" payload (Result<json>); the
     /// implementation is expected to sign the request.
+    /// a_public_call: same shape for NONE-security methods (market data)
+    /// that must NOT carry signature params.
     using RawCall =
         std::function<Result<nlohmann::json>(const std::string&, const nlohmann::json&)>;
 
-    explicit BinanceApi(RawCall a_call) : call_(std::move(a_call)) {}
+    explicit BinanceApi(RawCall a_call, RawCall a_public_call = nullptr)
+        : call_(std::move(a_call)), public_call_(std::move(a_public_call))
+    {}
 
     /// "order.place". Errors: "transport", "protocol", "venue:<code>".
     [[nodiscard]] auto place(const BinancePlaceRequest& a_request) -> Result<BinanceOrderAck>;
@@ -70,11 +74,16 @@ class BinanceApi
     /// "openOrders.status" (all symbols).
     [[nodiscard]] auto get_open_orders() -> Result<std::vector<BinanceOrderInfo>>;
 
+    /// "ticker.price" (public, unsigned): last-traded price of a WIRE
+    /// symbol (e.g. "BTCUSDT"), verbatim decimal string.
+    [[nodiscard]] auto get_price(const std::string& a_wire_symbol) -> Result<std::string>;
+
   private:
     [[nodiscard]] auto invoke(const std::string& a_method,
                               const nlohmann::json& a_params) -> Result<nlohmann::json>;
 
     RawCall call_;
+    RawCall public_call_;
 };
 
 /// Outcome of an order.status lookup used to resolve unknown outcomes.

@@ -256,6 +256,27 @@ TEST_CASE("SymbolTranslator converts gateway and wire symbols both ways")
     }
 }
 
+TEST_CASE("ticker.price params and result parsing")
+{
+    const auto params = build_ticker_price_params("BTCUSDT");
+    CHECK(params == nlohmann::json{{"symbol", "BTCUSDT"}});
+
+    const nlohmann::json result =
+        nlohmann::json{{"symbol", "BTCUSDT"}, {"price", "61000.01000000"}};
+    const auto price = parse_ticker_price(result);
+    REQUIRE(price.is_ok());
+    CHECK(price.value() == "61000.01000000");
+
+    SUBCASE("missing price field is a protocol error")
+    {
+        CHECK_FALSE(parse_ticker_price(nlohmann::json{{"symbol", "BTCUSDT"}}).is_ok());
+    }
+    SUBCASE("non-object payload is a protocol error")
+    {
+        CHECK_FALSE(parse_ticker_price(nlohmann::json::array()).is_ok());
+    }
+}
+
 TEST_CASE("SymbolTranslator is safe under concurrent REST and feed traffic")
 {
     // The connector calls from crow workers (to_wire) and the feed notifier

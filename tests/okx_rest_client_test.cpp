@@ -380,4 +380,63 @@ TEST_CASE("malformed venue responses produce protocol errors")
     }
 }
 
+TEST_CASE("get_ticker returns the last price of a public instrument")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    server.set_ticker("BTC-USDT", "61750.5");
+    const auto price = client.get_ticker("BTC-USDT");
+    REQUIRE(price.is_ok());
+    CHECK(price.value() == "61750.5");
+
+    // public market data: the request must not carry auth headers
+    const auto recorded = server.recorded_requests().back();
+    CHECK(recorded.method == "GET");
+    CHECK(recorded.target == "/api/v5/market/ticker?instId=BTC-USDT");
+    bool has_auth_header = false;
+    for (const auto& [name, value] : recorded.headers) {
+        if (name.rfind("OK-ACCESS-", 0) == 0) {
+            has_auth_header = true;
+        }
+    }
+    CHECK_FALSE(has_auth_header);
+}
+
+TEST_CASE("get_ticker error paths")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    SUBCASE("unknown instrument is a venue error")
+    {
+        const auto price = client.get_ticker("XYZ-USDT");
+        REQUIRE_FALSE(price.is_ok());
+        CHECK(price.error().code == "venue:51001");
+    }
+    SUBCASE("malformed payload is a protocol error")
+    {
+        server.set_next_raw_response(200, "[not json");
+        CHECK(client.get_ticker("BTC-USDT").error().code == "protocol");
+    }
+    SUBCASE("empty data array is a protocol error")
+    {
+        server.set_next_raw_response(200, R"({"code":"0","msg":"","data":[]})");
+        CHECK(client.get_ticker("BTC-USDT").error().code == "protocol");
+    }
+    SUBCASE("data without a string last field is a protocol error")
+    {
+        server.set_next_raw_response(200,
+                                     R"({"code":"0","msg":"","data":[{"instId":"BTC-USDT"}]})");
+        CHECK(client.get_ticker("BTC-USDT").error().code == "protocol");
+    }
+    SUBCASE("network failure is a transport error")
+    {
+        server.drop_next_request();
+        CHECK(client.get_ticker("BTC-USDT").error().code == "transport");
+    }
+}
+
 } // namespace

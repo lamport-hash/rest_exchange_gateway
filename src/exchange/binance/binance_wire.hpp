@@ -116,11 +116,19 @@ build_cancel_replace_params(const BinanceAmendRequest& a_request) -> Result<nloh
 /// everything the account has working).
 [[nodiscard]] auto build_open_orders_params() -> nlohmann::json;
 
+/// "ticker.price" params for a single wire symbol (public market data,
+/// no signature).
+[[nodiscard]] auto build_ticker_price_params(const std::string& a_wire_symbol) -> nlohmann::json;
+
 // ---- response parsing ---------------------------------------------------
 
 /// Parse a successful "order.place"-style result object into an ack.
 /// Tolerant of missing optional fields (ACK responses carry only ids).
 [[nodiscard]] auto parse_order_ack(const nlohmann::json& a_result) -> BinanceOrderAck;
+
+/// Parse a "ticker.price" result object: {"symbol": "...", "price": "..."}.
+/// Returns the price verbatim; error Result for anything else.
+[[nodiscard]] auto parse_ticker_price(const nlohmann::json& a_result) -> Result<std::string>;
 
 /// Parse an order-status-shaped result object. Returns an error Result for
 /// non-object payloads.

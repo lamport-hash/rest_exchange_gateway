@@ -13,6 +13,7 @@ Source of truth for behavior: `src/rest/order_routes.cpp`.
 | GET | `/orders/{clientOrderId}` | order status (registry view) |
 | DELETE | `/orders/{clientOrderId}` | cancel (idempotent) |
 | PUT | `/orders/{clientOrderId}` | amend (price and/or quantity) |
+| GET | `/price/{symbol}` | last-traded price (`?venue=`, default venue) |
 | GET | `/health` | liveness + registry stats |
 
 ## Error envelope
@@ -114,6 +115,20 @@ changes; the clientOrderId is stable). **200**:
 
 Errors: 400 `invalid_request`/`risk_*`; 404; 409 `order_terminal`/
 `venue_rejected`; 502.
+
+## GET /price/{symbol} — last-traded price
+
+Public venue market data passthrough (OKX `GET /api/v5/market/ticker`,
+Binance WS-API `ticker.price`). Optional `venue` query parameter routes;
+default venue when absent. **200**:
+
+```json
+{"symbol": "BTC-USDT", "venue": "OKX", "price": "61750.5"}
+```
+
+Errors: 400 `invalid_request` (unknown venue); 409 `venue_rejected`
+(unknown instrument — reason carries the venue code, e.g. `venue:51001`);
+502 `venue_unavailable`.
 
 ## GET /health
 

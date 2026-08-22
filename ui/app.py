@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -348,6 +349,19 @@ def orders() -> JSONResponse:
         return JSONResponse({"orders": [], "error": str(exc)}, status_code=200)
 
 
+@app.get("/api/price")
+def price(symbol: str = "BTC-USDT", venue: str | None = None) -> JSONResponse:
+    """Last-traded price of a pair, served by the gateway (Monitor tab)."""
+    path = "/price/" + urllib.parse.quote(symbol)
+    if venue:
+        path += "?venue=" + urllib.parse.quote(venue)
+    try:
+        _, body = _gateway_get(path, timeout=4.0)
+        return JSONResponse(body)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=200)
+
+
 # ------------------------------------------------------------- api playground ---
 
 _PROXY_METHODS = {"GET", "POST", "PUT", "DELETE"}
@@ -373,8 +387,8 @@ def proxy(req: _ProxyRequest) -> JSONResponse:
     path = req.path
     if not path.startswith("/") or ".." in path or "://" in path:
         raise HTTPException(status_code=400, detail="path must be an absolute gateway path")
-    if not path.startswith(("/orders", "/health")):
-        raise HTTPException(status_code=400, detail="path must target /orders or /health")
+    if not path.startswith(("/orders", "/health", "/price")):
+        raise HTTPException(status_code=400, detail="path must target /orders, /price or /health")
 
     data = None
     if method in ("POST", "PUT"):

@@ -61,6 +61,37 @@ body {
 #events .label { font-size: 11px; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
 #event-ticker { font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+#market {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: #12161c;
+}
+#market .label { font-size: 11px; text-transform: uppercase; color: var(--muted); }
+#price-symbol {
+  background: #0b0e12;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 120px;
+}
+#price-venue {
+  background: #0b0e12;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+#price-line { font-size: 13px; font-weight: 600; }
+#price-line.ok { color: #58d59a; }
+#price-line.bad { color: #ff8a80; font-weight: 400; }
+
 section { padding: 12px 16px 20px; }
 .section-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .section-head h2 { margin: 0; font-size: 15px; }

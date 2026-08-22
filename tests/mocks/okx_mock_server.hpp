@@ -63,6 +63,10 @@ class OkxMockServer
     void set_fill_mode(FillMode a_mode);
     void apply_fill(const std::string& a_cl_ord_id, const std::string& a_qty,
                     const std::string& a_px);
+    /// GET /api/v5/market/ticker serves this instrument at this price
+    /// (defaults BTC-USDT @ 50000). Any other instId is rejected with
+    /// "51001" like live OKX.
+    void set_ticker(const std::string& a_inst_id, const std::string& a_last_price);
     /// One-shot fault injection: the next request gets a raw response instead
     /// of the normal envelope.
     void set_next_raw_response(int a_status, std::string a_body);
@@ -116,6 +120,8 @@ class OkxMockServer
 
     exchange::okx::OkxConfig client_config_;
     FillMode fill_mode_ = FillMode::None;
+    std::string ticker_inst_id_ = "BTC-USDT";
+    std::string ticker_last_ = "50000";
     int raw_status_ = 0;
     std::string raw_body_;
     int drop_next_ = 0;

@@ -154,6 +154,12 @@ class ExchangeConnector
     /// and skip items they cannot normalize.
     [[nodiscard]] virtual auto get_open_orders() -> Result<std::vector<OrderSnapshot>> = 0;
 
+    /// Last-traded price of an instrument (public market data, decimal
+    /// string as reported by the venue). Errors: "transport", "protocol",
+    /// "venue:<code>" (e.g. unknown instrument).
+    [[nodiscard]] virtual auto
+    get_price(const std::string& a_instrument_id) -> Result<std::string> = 0;
+
     /// Register the execution-report sink (WebSocket-driven updates). Must
     /// be installed before start(); reports are delivered on connector-owned
     /// threads.

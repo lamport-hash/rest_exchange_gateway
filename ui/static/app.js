@@ -6,6 +6,8 @@ const state = {
   openLogs: new Set(), // test ids whose log row is expanded
   orders: [],
   lastOrdersOk: false,
+  priceSymbol: "BTC-USDT",
+  priceVenue: "",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -27,6 +29,42 @@ function initTabs() {
       if (btn.dataset.tab === "diagrams") renderDiagrams(); // lazy, once
     };
   });
+}
+
+/* ------------------------------------------------------------- price feed -- */
+
+async function refreshPrice() {
+  const line = $("#price-line");
+  if (!line) return;
+  const params = new URLSearchParams({ symbol: state.priceSymbol });
+  if (state.priceVenue) params.set("venue", state.priceVenue);
+  try {
+    const data = await fetchJson(`/api/price?${params}`);
+    if (data.error) {
+      line.textContent = data.error;
+      line.className = "mono bad";
+      return;
+    }
+    line.textContent = `${data.symbol} @ ${data.venue}: ${data.price}`;
+    line.className = "mono ok";
+  } catch {
+    line.textContent = "–";
+    line.className = "mono muted";
+  }
+}
+
+function initPriceControls() {
+  const symbol = $("#price-symbol");
+  const venue = $("#price-venue");
+  if (!symbol || !venue) return;
+  symbol.oninput = () => {
+    state.priceSymbol = symbol.value.trim() || "BTC-USDT";
+    refreshPrice();
+  };
+  venue.onchange = () => {
+    state.priceVenue = venue.value;
+    refreshPrice();
+  };
 }
 
 /* ---------------------------------------------------------------- panels -- */
@@ -195,6 +233,15 @@ const ENDPOINTS = [
     fields: [],
     body: null,
     example: `200 {"status":"ok","knownOrders":3,"reportsApplied":12,"reportsStale":2}`,
+  },
+  {
+    id: "price", label: "GET /price/{symbol} — last price", method: "GET", path: "/price/BTC-USDT",
+    description: "Last-traded price of a pair (public venue market data). Optional ?venue= routes; default venue when absent.",
+    fields: [
+      ["venue (query)", "optional", "OKX | BINANCE via ?venue=…; default from config"],
+    ],
+    body: null,
+    example: `200 {"symbol":"BTC-USDT","venue":"OKX","price":"61750.5"}`,
   },
 ];
 
@@ -527,10 +574,12 @@ async function refreshAll() {
   try { renderGateway(await fetchJson("/api/gateway/status")); } catch { /* gateway down */ }
   try { renderOrders(await fetchJson("/api/orders")); } catch { /* ignore */ }
   try { await refreshRuns(); } catch { /* ignore */ }
+  try { await refreshPrice(); } catch { /* ignore */ }
 }
 
 async function init() {
   initTabs();
+  initPriceControls();
   renderEndpoints();
   const data = await fetchJson("/api/tests");
   state.tests = data.tests || [];

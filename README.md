@@ -69,7 +69,8 @@ POST /orders
   (Binance `EXPIRED`/`EXPIRED_IN_MATCH`/`PENDING_CANCEL` → canceled, etc.).
 - Full REST surface: `POST /orders`, `GET /orders` (registry listing),
   `GET /orders/{id}`, `DELETE /orders/{id}`
-  (idempotent), `PUT /orders/{id}` (amend), `GET /health`.
+  (idempotent), `PUT /orders/{id}` (amend), `GET /price/{symbol}`
+  (last-traded price, `?venue=`), `GET /health`.
   Errors are always `{"error":{"code","reason","clientOrderId"}}`.
   Endpoint-by-endpoint reference: `doc/api.md`.
 

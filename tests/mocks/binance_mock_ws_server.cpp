@@ -164,6 +164,13 @@ void BinanceMockWsServer::set_fill_mode(FillMode a_mode)
     fill_mode_ = a_mode;
 }
 
+void BinanceMockWsServer::set_ticker(const std::string& a_wire_symbol, const std::string& a_price)
+{
+    const std::lock_guard lock(mutex_);
+    ticker_symbol_ = a_wire_symbol;
+    ticker_price_ = a_price;
+}
+
 void BinanceMockWsServer::apply_fill(const std::string& a_client_order_id, const std::string& a_qty,
                                      const std::string& a_px)
 {
@@ -560,17 +567,22 @@ void BinanceMockWsServer::handle_frame(httplib::ws::WebSocket& a_ws, Session& a_
 
     // userDataStream.subscribe.signature is SIGNED too (apiKey/timestamp/
     // signature params), so it runs through the same auth check.
-    if (auto auth_error = check_signed(params)) {
-        const auto separator = auth_error->find(':');
-        const int code = std::stoi(auth_error->substr(0, separator));
-        const std::string msg = auth_error->substr(separator + 1);
-        {
-            const std::lock_guard lock(mutex_);
-            ++stats_.signature_failures;
-            cv_.notify_all();
+    // "ticker.price" is a NONE-security (public) market-data method: it
+    // must go out unsigned and is served without the SIGNED check.
+    const bool is_public_method = (method == "ticker.price");
+    if (!is_public_method) {
+        if (auto auth_error = check_signed(params)) {
+            const auto separator = auth_error->find(':');
+            const int code = std::stoi(auth_error->substr(0, separator));
+            const std::string msg = auth_error->substr(separator + 1);
+            {
+                const std::lock_guard lock(mutex_);
+                ++stats_.signature_failures;
+                cv_.notify_all();
+            }
+            a_ws.send(error_response(a_request, 400, code, msg));
+            return;
         }
-        a_ws.send(error_response(a_request, 400, code, msg));
-        return;
     }
 
     std::string reply;
@@ -581,6 +593,13 @@ void BinanceMockWsServer::handle_frame(httplib::ws::WebSocket& a_ws, Session& a_
         ++stats_.subscribes;
         cv_.notify_all();
         reply = ok_response(a_request, nlohmann::json{{"subscriptionId", 0}});
+    } else if (method == "ticker.price") {
+        const std::string symbol = string_field(params, "symbol");
+        const std::lock_guard lock(mutex_);
+        reply = (symbol.empty() || symbol != ticker_symbol_)
+                    ? error_response(a_request, 400, -1121, "Invalid symbol.")
+                    : ok_response(a_request, nlohmann::json{{"symbol", ticker_symbol_},
+                                                            {"price", ticker_price_}});
     } else if (method == "order.place") {
         const std::lock_guard lock(mutex_);
         const auto result = handle_place(params);

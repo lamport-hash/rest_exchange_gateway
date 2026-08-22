@@ -12,6 +12,7 @@ namespace gateway::rest {
 ///   GET    /orders/{id}       registry view (OMS state)
 ///   DELETE /orders/{id}       cancel (idempotent)
 ///   PUT    /orders/{id}       amend (price and/or quantity)
+///   GET    /price/{symbol}    last-traded price (?venue=..., default venue)
 ///   GET    /health            liveness + registry size
 /// a_oms must outlive the app. All error responses use the structured
 /// schema {"error": {"code", "reason", "clientOrderId"}}; exceptions

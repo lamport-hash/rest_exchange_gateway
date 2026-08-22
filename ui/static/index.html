@@ -24,6 +24,17 @@
 
   <!-- =============================================================== monitor -->
   <div id="tab-monitor" class="tab-panel active">
+    <section id="market">
+      <span class="label">price</span>
+      <input id="price-symbol" class="mono" value="BTC-USDT" spellcheck="false">
+      <select id="price-venue">
+        <option value="">default venue</option>
+        <option value="okx">okx</option>
+        <option value="binance">binance</option>
+      </select>
+      <span id="price-line" class="mono muted">–</span>
+    </section>
+
     <section id="events">
       <span class="label">recent events</span>
       <div id="event-ticker" class="muted">–</div>

@@ -470,6 +470,30 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                                      {"reportsStale", stats.reports_stale}};
         return json_response(200, body);
     });
+
+    // ---- GET /price/{symbol}?venue=... ----------------------------------
+    // Public market data passthrough: last-traded price of a pair. The
+    // optional venue query parameter routes (default venue when absent,
+    // like POST /orders). Errors follow the shared error envelope.
+    CROW_ROUTE(a_app, "/price/<string>")
+    ([&a_oms](const crow::request& a_req, const std::string& a_symbol) -> crow::response {
+        try {
+            std::string venue;
+            if (const char* venue_param = a_req.url_params.get("venue")) {
+                venue = to_lower(venue_param);
+            }
+            const auto quote = a_oms.get_price(a_symbol, venue);
+            if (!quote.is_ok()) {
+                return map_error(quote.error(), "");
+            }
+            const nlohmann::json body = {{"symbol", a_symbol},
+                                         {"venue", quote.value().venue},
+                                         {"price", quote.value().price}};
+            return json_response(200, body);
+        } catch (...) {
+            return internal_error_response();
+        }
+    });
 }
 
 } // namespace gateway::rest

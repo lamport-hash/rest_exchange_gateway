@@ -44,6 +44,8 @@ class BinanceConnector final : public ExchangeConnector
     [[nodiscard]] auto
     get_order(const OrderQuery& a_query) -> Result<std::optional<OrderSnapshot>> override;
     [[nodiscard]] auto get_open_orders() -> Result<std::vector<OrderSnapshot>> override;
+    [[nodiscard]] auto
+    get_price(const std::string& a_instrument_id) -> Result<std::string> override;
 
     void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override;

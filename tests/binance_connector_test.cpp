@@ -122,11 +122,10 @@ TEST_CASE_FIXTURE(ConnectorFixture, "place without timeInForce defaults to GTC")
     REQUIRE(placement.is_ok());
     CHECK(server_->wait_for_places(1, 5000));
     const auto frames = server_->stats().received;
-    const auto frame = std::find_if(
-        frames.begin(), frames.end(), [](const std::string& a_frame) {
-            return a_frame.find("\"timeInForce\":\"GTC\"") != std::string::npos &&
-                   a_frame.find("co0013") != std::string::npos;
-        });
+    const auto frame = std::find_if(frames.begin(), frames.end(), [](const std::string& a_frame) {
+        return a_frame.find("\"timeInForce\":\"GTC\"") != std::string::npos &&
+               a_frame.find("co0013") != std::string::npos;
+    });
     CHECK(frame != frames.end());
 }
 
@@ -348,4 +347,21 @@ TEST_CASE_FIXTURE(ConnectorFixture, "connectivity events reflect the session lif
     }
 
     connector_->stop(); // join the supervisor before Counters goes away
+}
+
+TEST_CASE_FIXTURE(ConnectorFixture, "get_price translates the symbol and serves the ticker")
+{
+    connector_->start();
+    server_->set_ticker("BTCUSDT", "61000.5");
+
+    const auto price = connector_->get_price("BTC-USDT");
+    REQUIRE(price.is_ok());
+    CHECK(price.value() == "61000.5");
+
+    SUBCASE("unknown instrument surfaces the venue error")
+    {
+        const auto bad = connector_->get_price("NOPE-USDT");
+        REQUIRE_FALSE(bad.is_ok());
+        CHECK(bad.error().code == "venue:-1121");
+    }
 }

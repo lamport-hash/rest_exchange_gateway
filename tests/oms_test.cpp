@@ -45,10 +45,15 @@ class FakeConnector final : public ExchangeConnector
     };
     std::function<Result<std::vector<OrderSnapshot>>()> open_impl =
         []() -> Result<std::vector<OrderSnapshot>> { return std::vector<OrderSnapshot>{}; };
+    std::function<Result<std::string>(const std::string&)> price_impl =
+        [](const std::string& a_symbol) -> Result<std::string> {
+        return "fake-" + a_symbol + "-price";
+    };
 
     std::vector<OrderRequest> placed;
     std::vector<CancelRequest> cancels;
     std::vector<AmendRequest> amends;
+    std::vector<std::string> price_queries;
 
     [[nodiscard]] auto place_order(const OrderRequest& a_request) -> Result<OrderPlacement> override
     {
@@ -74,6 +79,11 @@ class FakeConnector final : public ExchangeConnector
     [[nodiscard]] auto get_open_orders() -> Result<std::vector<OrderSnapshot>> override
     {
         return open_impl();
+    }
+    [[nodiscard]] auto get_price(const std::string& a_instrument_id) -> Result<std::string> override
+    {
+        price_queries.push_back(a_instrument_id);
+        return price_impl(a_instrument_id);
     }
     void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override
@@ -905,6 +915,47 @@ TEST_CASE("all_orders snapshots the registry sorted and isolated from mutation")
     oms.on_execution_report(report("gw2", OrderState::Filled, "1", "50000"));
     CHECK(snapshot[1].state == OrderState::Live);
     CHECK(oms.query("gw2").value().state == OrderState::Filled);
+}
+
+TEST_CASE("get_price routes to the resolved venue and reports it")
+{
+    FakeConnector okx;
+    FakeConnector binance;
+    OrderManagementSystem oms{{{"okx", &okx}, {"binance", &binance}}, nullptr, RiskConfig{}, "okx"};
+
+    SUBCASE("omitted venue resolves to the default venue")
+    {
+        const auto quote = oms.get_price("BTC-USDT");
+        REQUIRE(quote.is_ok());
+        CHECK(quote.value().venue == "okx");
+        CHECK(quote.value().price == "fake-BTC-USDT-price");
+        CHECK(okx.price_queries.size() == 1);
+        CHECK(okx.price_queries.front() == "BTC-USDT");
+        CHECK(binance.price_queries.empty());
+    }
+    SUBCASE("explicit venue routes to that connector")
+    {
+        const auto quote = oms.get_price("BTC-USDT", "binance");
+        REQUIRE(quote.is_ok());
+        CHECK(quote.value().venue == "binance");
+        CHECK(okx.price_queries.empty());
+    }
+    SUBCASE("unknown venue is an invalid_request error naming the venue")
+    {
+        const auto quote = oms.get_price("BTC-USDT", "bybit");
+        REQUIRE_FALSE(quote.is_ok());
+        CHECK(quote.error().code == "invalid_request");
+        CHECK(quote.error().message.find("bybit") != std::string::npos);
+    }
+    SUBCASE("connector errors pass through untouched")
+    {
+        binance.price_impl = [](const std::string&) -> Result<std::string> {
+            return Error{"transport", "venue unreachable"};
+        };
+        const auto quote = oms.get_price("BTC-USDT", "binance");
+        REQUIRE_FALSE(quote.is_ok());
+        CHECK(quote.error().code == "transport");
+    }
 }
 
 } // namespace

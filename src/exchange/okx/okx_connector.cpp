@@ -173,6 +173,18 @@ auto OkxConnector::get_open_orders() -> Result<std::vector<OrderSnapshot>>
     return snapshots;
 }
 
+auto OkxConnector::get_price(const std::string& a_instrument_id) -> Result<std::string>
+{
+    // Read-only public market data: no side effects, so plain transport
+    // retries (resolve-then-retry is unnecessary) per the shared policy.
+    const auto attempt = [this, &a_instrument_id]() -> Result<std::string> {
+        return client_.get_ticker(a_instrument_id);
+    };
+    return with_retries<std::string>(
+        config_.retry, retry_clock_, attempt,
+        [](const Error& a_error) { return a_error.code == "transport"; });
+}
+
 void OkxConnector::set_execution_report_handler(
     std::function<void(const ExecutionReport&)> a_handler)
 {

@@ -81,9 +81,14 @@ class FakeVenueConnector final : public ExchangeConnector
     };
     std::function<Result<std::vector<OrderSnapshot>>()> open_impl =
         []() -> Result<std::vector<OrderSnapshot>> { return std::vector<OrderSnapshot>{}; };
+    std::function<Result<std::string>(const std::string&)> price_impl =
+        [](const std::string& a_symbol) -> Result<std::string> {
+        return "fake-" + a_symbol + "-price";
+    };
     std::vector<OrderRequest> placed;
     std::vector<AmendRequest> amends;
     std::vector<CancelRequest> cancels;
+    std::vector<std::string> price_queries;
 
     [[nodiscard]] auto place_order(const OrderRequest& a_request) -> Result<OrderPlacement> override
     {
@@ -109,6 +114,11 @@ class FakeVenueConnector final : public ExchangeConnector
     [[nodiscard]] auto get_open_orders() -> Result<std::vector<OrderSnapshot>> override
     {
         return open_impl();
+    }
+    [[nodiscard]] auto get_price(const std::string& a_instrument_id) -> Result<std::string> override
+    {
+        price_queries.push_back(a_instrument_id);
+        return price_impl(a_instrument_id);
     }
     void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override
@@ -850,6 +860,121 @@ TEST_CASE("health endpoint answers ok with registry stats")
     const auto body = nlohmann::json::parse(res->body);
     CHECK(body["status"] == "ok");
     CHECK(body["knownOrders"] == 1);
+}
+
+TEST_CASE("a fully filled order terminates with its fill retained")
+{
+    GatewayFixture fixture;
+
+    REQUIRE(fixture.client().Post("/orders", kPlaceBody, "application/json")->status == 201);
+
+    // partial fill first, then the full fill: the state machine must walk
+    // live -> partially_filled -> filled and keep the final fill numbers
+    fixture.push_update("gw0001", "partially_filled", "0.0004", "49999.5");
+    REQUIRE(fixture.wait_for_state("gw0001", "partially_filled"));
+    fixture.push_update("gw0001", "filled", "0.001", "50000");
+    REQUIRE(fixture.wait_for_state("gw0001", "filled"));
+
+    const auto get = fixture.client().Get("/orders/gw0001");
+    REQUIRE(get->status == 200);
+    const auto snapshot = nlohmann::json::parse(get->body);
+    CHECK(snapshot["state"] == "filled");
+    CHECK(snapshot["filledQuantity"] == "0.001");
+    CHECK(snapshot["averageFillPrice"] == "50000");
+
+    SUBCASE("filled is terminal: cancel is rejected with 409 order_terminal")
+    {
+        const auto cancel = fixture.client().Delete("/orders/gw0001");
+        REQUIRE(cancel->status == 409);
+        CHECK(error_body(cancel)["error"]["code"] == "order_terminal");
+        // and the registry view is unchanged
+        CHECK(nlohmann::json::parse(fixture.client().Get("/orders/gw0001")->body)["state"] ==
+              "filled");
+    }
+}
+
+TEST_CASE("a partially filled order can be canceled and keeps its fill")
+{
+    GatewayFixture fixture;
+
+    REQUIRE(fixture.client().Post("/orders", kPlaceBody, "application/json")->status == 201);
+    fixture.push_update("gw0001", "partially_filled", "0.0004", "49999.5");
+    REQUIRE(fixture.wait_for_state("gw0001", "partially_filled"));
+
+    const auto cancel = fixture.client().Delete("/orders/gw0001");
+    REQUIRE(cancel->status == 200);
+    const auto canceled = nlohmann::json::parse(cancel->body);
+    CHECK(canceled["state"] == "canceled");
+    CHECK(canceled["exchangeOrderId"] == "mock-1");
+
+    // the registry keeps the executed slice on the canceled record
+    const auto get = fixture.client().Get("/orders/gw0001");
+    REQUIRE(get->status == 200);
+    const auto snapshot = nlohmann::json::parse(get->body);
+    CHECK(snapshot["state"] == "canceled");
+    CHECK(snapshot["filledQuantity"] == "0.0004");
+    CHECK(snapshot["averageFillPrice"] == "49999.5");
+
+    // a second cancel is the same idempotent outcome
+    CHECK(fixture.client().Delete("/orders/gw0001")->status == 200);
+}
+
+TEST_CASE("GET /price/{symbol} serves the pair's last price")
+{
+    GatewayFixture fixture;
+    fixture.mock().set_ticker("BTC-USDT", "61750.5");
+
+    SUBCASE("default venue serves the venue ticker")
+    {
+        const auto res = fixture.client().Get("/price/BTC-USDT");
+        REQUIRE(res->status == 200);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["symbol"] == "BTC-USDT");
+        CHECK(body["venue"] == "okx");
+        CHECK(body["price"] == "61750.5");
+    }
+    SUBCASE("venue query parameter routes (case-insensitive)")
+    {
+        const auto res = fixture.client().Get("/price/BTC-USDT?venue=BINANCE");
+        REQUIRE(res->status == 200);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["venue"] == "binance");
+        CHECK(body["price"] == "fake-BTC-USDT-price");
+        REQUIRE(fixture.binance().price_queries.size() == 1);
+        CHECK(fixture.binance().price_queries.front() == "BTC-USDT");
+    }
+    SUBCASE("unknown venue is rejected with the supported list")
+    {
+        const auto res = fixture.client().Get("/price/BTC-USDT?venue=bybit");
+        REQUIRE(res->status == 400);
+        CHECK(error_body(res)["error"]["code"] == "invalid_request");
+    }
+    SUBCASE("unknown instrument surfaces the venue rejection")
+    {
+        const auto res = fixture.client().Get("/price/NOPE-USDT");
+        REQUIRE(res->status == 409);
+        CHECK(error_body(res)["error"]["code"] == "venue_rejected");
+    }
+    SUBCASE("venue transport problems become 502 venue_unavailable")
+    {
+        const auto dead_port = gateway::testing::pick_free_port();
+        auto config = base_config();
+        config.port = static_cast<int>(dead_port);
+        config.ws.enabled = false;
+        OkxConnector connector{config, [] { return std::string("2026-08-20T10:00:00.000Z"); }};
+        gateway::OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+        crow::SimpleApp app;
+        gateway::rest::register_order_routes(app, oms);
+        const auto port = gateway::testing::pick_free_port();
+        auto future = app.port(port).concurrency(1).loglevel(crow::LogLevel::Warning).run_async();
+        app.wait_for_server_start();
+        httplib::Client client{"127.0.0.1", static_cast<int>(port)};
+        const auto res = client.Get("/price/BTC-USDT");
+        REQUIRE(res->status == 502);
+        CHECK(error_body(res)["error"]["code"] == "venue_unavailable");
+        app.stop();
+        future.wait();
+    }
 }
 
 TEST_CASE("market orders reach the venue without a price field")

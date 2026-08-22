@@ -51,9 +51,13 @@ BinanceConnector::BinanceConnector(BinanceConfig a_config, UnixMsProvider a_time
     : config_(a_config),
       timestamp_provider_(a_timestamp ? std::move(a_timestamp) : UnixMsProvider{&real_unix_ms}),
       retry_clock_(real_retry_clock()), ws_(std::move(a_config), timestamp_provider_),
-      api_([this](const std::string& a_method, const nlohmann::json& a_params) {
-          return ws_.call_signed(a_method, a_params);
-      })
+      api_([this](const std::string& a_method,
+                  const nlohmann::json& a_params) { return ws_.call_signed(a_method, a_params); },
+           // Public (NONE-security) methods like ticker.price go out
+           // unsigned on the same session.
+           [this](const std::string& a_method, const nlohmann::json& a_params) {
+               return ws_.call(a_method, a_params);
+           })
 {}
 
 BinanceConnector::~BinanceConnector()
@@ -161,6 +165,19 @@ auto BinanceConnector::get_open_orders() -> Result<std::vector<OrderSnapshot>>
         }
     }
     return snapshots;
+}
+
+auto BinanceConnector::get_price(const std::string& a_instrument_id) -> Result<std::string>
+{
+    // Read-only public market data: plain transport retries (no side
+    // effects, resolve-then-retry unnecessary), shared venue policy.
+    const std::string wire_symbol = symbols_.to_wire(a_instrument_id);
+    const auto attempt = [this, &wire_symbol]() -> Result<std::string> {
+        return api_.get_price(wire_symbol);
+    };
+    return with_retries<std::string>(
+        config_.retry, retry_clock_, attempt,
+        [](const Error& a_error) { return a_error.code == "transport"; });
 }
 
 void BinanceConnector::set_execution_report_handler(
