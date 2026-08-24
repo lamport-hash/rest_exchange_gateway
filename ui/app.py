@@ -375,6 +375,180 @@ def risk() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=200)
 
 
+# --------------------------------------------------- spec 3.1 order flow ---
+
+# Traceability matrix for doc/project-spec.md §3.1 "Supported Order Flow".
+# Suite names reference the catalog above (UNIT_SUITES keys or special
+# test ids) — the frontend joins them with /api/runs to show live
+# outcomes. Implementation refs are file:line into the current tree.
+ORDER_FLOW_SPEC: dict[str, Any] = {
+    "spec": {
+        "section": "3.1",
+        "title": "Supported Order Flow",
+        "source": "doc/project-spec.md",
+    },
+    "requirements": [
+        {
+            "id": "new-limit",
+            "requirement": "New order — Limit",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:278", "what": "OMS::place — risk checks, idempotent replay, raced-report arbitration"},
+                {"ref": "src/rest/order_routes.cpp:121", "what": "POST /orders (type limit|market, price required)"},
+                {"ref": "include/gateway/exchange_connector.hpp:134", "what": "ExchangeConnector::place_order seam"},
+            ],
+            "tests": ["oms_test", "okx_connector_test", "binance_connector_test", "rest_api_test", "blackbox", "live_okx", "live_binance"],
+        },
+        {
+            "id": "new-market",
+            "requirement": "New order — Market",
+            "implementation": [
+                {"ref": "src/rest/order_routes.cpp:55", "what": "parse_order_type — market: price forbidden"},
+                {"ref": "include/gateway/exchange_connector.hpp:21", "what": "OrderType::Market"},
+            ],
+            "tests": ["rest_api_test", "okx_wire_test", "binance_wire_test", "live_okx", "live_binance"],
+        },
+        {
+            "id": "cancel",
+            "requirement": "Cancel order",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:404", "what": "OMS::cancel — idempotent, order_terminal refusal"},
+                {"ref": "src/rest/order_routes.cpp:268", "what": "DELETE /orders/{clientOrderId}"},
+                {"ref": "include/gateway/exchange_connector.hpp:138", "what": "ExchangeConnector::cancel_order seam"},
+            ],
+            "tests": ["oms_test", "okx_connector_test", "binance_connector_test", "rest_api_test", "blackbox", "live_okx", "live_binance"],
+        },
+        {
+            "id": "amend",
+            "requirement": "Replace / amend order",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:455", "what": "OMS::amend — re-runs risk, arbitrates cancelReplace legs"},
+                {"ref": "src/rest/order_routes.cpp:289", "what": "PUT /orders/{clientOrderId} (price and/or quantity)"},
+                {"ref": "include/gateway/exchange_connector.hpp:143", "what": "ExchangeConnector::amend_order seam (per-venue semantics documented)"},
+            ],
+            "tests": ["oms_test", "okx_rest_client_test", "okx_connector_test", "binance_connector_test", "rest_api_test", "blackbox", "live_okx", "live_binance"],
+        },
+        {
+            "id": "state-live",
+            "requirement": "Normalized state: New / Live",
+            "implementation": [
+                {"ref": "include/gateway/exchange_connector.hpp:29", "what": "OrderState enum — the five normalized states"},
+                {"ref": "src/core/order_state.hpp:29", "what": "kLegalTransitions — explicit legal-transition table"},
+            ],
+            "tests": ["order_state_test", "oms_test", "okx_wire_test", "binance_wire_test"],
+        },
+        {
+            "id": "state-partial",
+            "requirement": "Normalized state: Partially Filled",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:582", "what": "apply_observation — monotonic fill high-water mark"},
+                {"ref": "src/core/order_state.hpp:29", "what": "transition table (partial -> partial/filled/canceled legal)"},
+            ],
+            "tests": ["order_state_test", "oms_test", "okx_connector_test"],
+        },
+        {
+            "id": "state-filled",
+            "requirement": "Normalized state: Filled (terminal)",
+            "implementation": [
+                {"ref": "src/core/order_state.hpp:41", "what": "is_terminal — Filled/Canceled/Rejected end the lifecycle"},
+            ],
+            "tests": ["order_state_test", "oms_test", "rest_api_test"],
+        },
+        {
+            "id": "state-canceled",
+            "requirement": "Normalized state: Canceled (terminal)",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:404", "what": "OMS::cancel — cancel ack transitions to Canceled, fills retained"},
+            ],
+            "tests": ["order_state_test", "oms_test", "rest_api_test"],
+        },
+        {
+            "id": "state-rejected",
+            "requirement": "Normalized state: Rejected (terminal)",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:333", "what": "risk rejection recorded on the candidate, replayed to retries"},
+                {"ref": "src/core/oms.cpp:368", "what": "definitive venue rejection recorded, replayed to retries"},
+            ],
+            "tests": ["oms_test", "risk_test", "rest_api_test"],
+        },
+        {
+            "id": "explicit-mapping",
+            "requirement": "Client <-> exchange semantics mapping is explicit",
+            "implementation": [
+                {"ref": "src/exchange/okx/okx_wire.cpp:21", "what": "map_okx_state — OKX wire values -> OrderState"},
+                {"ref": "src/exchange/binance/binance_wire.cpp:199", "what": "map_binance_state — Binance statuses -> OrderState"},
+                {"ref": "src/exchange/okx/okx_wire.cpp:38", "what": "map_okx_side — buy|sell <-> venue spelling"},
+                {"ref": "src/exchange/binance/binance_wire.cpp:220", "what": "map_binance_side — buy|sell <-> BUY|SELL"},
+            ],
+            "tests": ["okx_wire_test", "binance_wire_test", "okx_connector_test", "binance_connector_test"],
+        },
+    ],
+    # The explicit client-concept -> venue-semantics tables (spec: mapping
+    # "must be explicit"). Mirrors the map_*_state functions verbatim.
+    "flow_mapping": [
+        {
+            "flow": "New order (limit / market)",
+            "client": "POST /orders — type limit|market, side buy|sell",
+            "okx": "POST /api/v5/trade/order — ordType limit|market, side buy|sell",
+            "binance": "WS-API order.place — type LIMIT|MARKET, side BUY|SELL",
+        },
+        {
+            "flow": "Cancel order",
+            "client": "DELETE /orders/{clientOrderId}",
+            "okx": "POST /api/v5/trade/cancel-order — keyed by clOrdId",
+            "binance": "WS-API order.cancel — keyed by newClientOrderId",
+        },
+        {
+            "flow": "Replace / amend order",
+            "client": "PUT /orders/{clientOrderId} — price and/or quantity, id stays stable",
+            "okx": "POST /api/v5/trade/amend-order — same ordId, newPx/newSz in place",
+            "binance": "WS-API order.cancelReplace (STOP_ON_FAILURE) — new exchange id, clientOrderId stays stable",
+        },
+    ],
+    "state_mapping": [
+        {
+            "state": "live",
+            "meaning": "New / Live — venue acked, working on the book",
+            "okx": "live",
+            "binance": "NEW, PENDING_NEW",
+        },
+        {
+            "state": "partially_filled",
+            "meaning": "some quantity executed, remainder working",
+            "okx": "partially_filled",
+            "binance": "PARTIALLY_FILLED",
+        },
+        {
+            "state": "filled",
+            "meaning": "full quantity executed — terminal",
+            "okx": "filled",
+            "binance": "FILLED",
+        },
+        {
+            "state": "canceled",
+            "meaning": "canceled (client or venue), remainder gone — terminal",
+            "okx": "canceled",
+            "binance": "CANCELED, PENDING_CANCEL, EXPIRED, EXPIRED_IN_MATCH",
+        },
+        {
+            "state": "rejected",
+            "meaning": "refused before resting (risk or venue) — terminal",
+            "okx": "no wire state — definitive venue error envelope (sCode) at place time",
+            "binance": "REJECTED",
+        },
+    ],
+    "mapping_note": "Unknown venue values map to nullopt — the report is discarded "
+    "(counted in /health reportsStale), never an error and never a wrong state.",
+}
+
+
+@app.get("/api/spec/order-flow")
+def spec_order_flow() -> JSONResponse:
+    """Spec 3.1 traceability matrix (Order flow tab): requirements,
+    implementation refs and covering suites; the frontend joins suite
+    names with /api/runs to surface live outcomes."""
+    return JSONResponse(ORDER_FLOW_SPEC)
+
+
 class _DemoBalanceRequest(BaseModel):
     type: str
     ccy: str

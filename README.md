@@ -285,7 +285,14 @@ docker compose up -d                         # dev + gateway + ui + edge
   recent `risk_*` rejections with their recorded reasons from the order
   registry), **Diagrams** (architecture, order
   state machine, place idempotency and restart-recovery mermaid diagrams,
-  rendered offline from a vendored `mermaid.min.js`), and **Tests** — all
+  rendered offline from a vendored `mermaid.min.js`), **Order flow** (spec
+  §3.1 traceability: every requirement — new order market/limit, cancel,
+  amend, the five normalized states, the explicit client↔venue mapping —
+  with its implementation refs (`file:line`) and covering suites, each
+  chip showing that suite's latest outcome from the run history and the
+  row status rolling them up into covered / failing / not run; plus the
+  explicit client-concept → OKX/Binance semantics tables for order flow
+  and execution states), and **Tests** — all
   21 ctest suites in both presets (debug = ASan+UBSan), the black-box
   rig, and the live venue suites, each with a Run button, live log tail,
   parsed outcome summary and duration. Tests execute in the UI container,

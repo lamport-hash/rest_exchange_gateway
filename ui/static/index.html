@@ -21,6 +21,7 @@
     <button class="tab" data-tab="balance">Balance</button>
     <button class="tab" data-tab="risk">Risk</button>
     <button class="tab" data-tab="diagrams">Diagrams</button>
+    <button class="tab" data-tab="orderflow">Order flow</button>
     <button class="tab" data-tab="tests">Tests</button>
   </nav>
 
@@ -329,6 +330,57 @@ curl -s localhost:8080/health</pre>
     O->>O: refresh fills, resolve non-terminal
     O->>O: venue-absent -> Rejected / unreachable -> kept, warned
     G->>G: serve REST, reconcile again on every WS reconnect</pre>
+    </section>
+  </div>
+
+  <!-- ============================================================= order flow -->
+  <div id="tab-orderflow" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>Spec 3.1 — Supported Order Flow</h2>
+        <span class="muted">doc/project-spec.md — requirements vs implementation vs tests</span>
+        <span id="orderflow-status" class="badge unknown">–</span>
+      </div>
+      <table id="orderflow-table">
+        <thead>
+          <tr>
+            <th>requirement</th><th>implementation</th><th>tests</th>
+            <th class="col-outcome">status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="table-note muted">
+        chips show the latest outcome of each covering suite (debug / release presets, blackbox, live);
+        run them from the Tests tab — the status column re-evaluates on every poll
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Client concepts → exchange semantics</h2>
+        <span class="muted">the explicit mapping the spec demands — one client surface, two venue dialects</span>
+      </div>
+      <table id="flowmap-table">
+        <thead>
+          <tr><th>order flow</th><th>client (gateway REST)</th><th>OKX</th><th>Binance</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Normalized execution states → venue wire values</h2>
+        <span class="muted">src/exchange/{okx,binance} wire mappings — one state vocabulary everywhere</span>
+      </div>
+      <table id="statemap-table">
+        <thead>
+          <tr><th>normalized state</th><th>meaning</th><th>OKX state</th><th>Binance executionReport status</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="statemap-note" class="table-note muted"></div>
     </section>
   </div>
 

@@ -317,6 +317,34 @@ table.fields td { padding: 3px 8px; }
 
 #errors-table td { font-size: 12px; }
 
+/* ------------------------------------------------------------- order flow -- */
+
+#orderflow-table td, #flowmap-table td, #statemap-table td {
+  font-size: 12px;
+  vertical-align: top;
+}
+#orderflow-table td.mono, #flowmap-table td.mono, #statemap-table td.mono {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.impl-list, .suite-chips { display: flex; flex-direction: column; gap: 3px; }
+.suite-chips { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+.suite-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: #0b0e12;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.suite-chip.passed  { color: #58d59a; border-color: #1c5c3d; }
+.suite-chip.failed  { color: #ff8a80; border-color: #6e2b27; }
+.suite-chip.timeout { color: #e5b567; border-color: #5c4a16; }
+.suite-chip.running { color: var(--accent); }
+.table-note { padding: 6px 2px 0; font-size: 12px; }
+
 /* --------------------------------------------------------------- diagrams -- */
 
 .diagram {

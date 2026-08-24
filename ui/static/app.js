@@ -8,6 +8,7 @@ const state = {
   lastOrdersOk: false,
   priceSymbol: "BTC-USDT",
   priceVenue: "",
+  orderFlow: null,  // cached /api/spec/order-flow matrix
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -490,6 +491,144 @@ function renderRejections() {
   }
 }
 
+/* ------------------------------------------------------------- order flow -- */
+
+// Catalog entries covering one suite name from the spec matrix: unit
+// suites match by name in both presets, special suites by id.
+function suiteCandidates(name) {
+  return state.tests.filter((t) => t.name === name || t.id === name);
+}
+
+function suiteChip(t) {
+  const run = state.runsByTest[t.id];
+  const chip = document.createElement("span");
+  const label = t.kind === "unit" ? t.preset : t.id;
+  chip.className = `suite-chip ${runClass(run)}`;
+  chip.textContent = run ? `${label} ${run.status === "passed" ? "✓" : run.status === "failed" ? "✗" : ""}`.trim()
+    : label;
+  chip.title = t.id;
+  return chip;
+}
+
+function requirementStatus(candidates) {
+  const runs = candidates.map((t) => state.runsByTest[t.id]).filter(Boolean);
+  if (!runs.length) return { text: "not run", cls: "unknown" };
+  const statuses = runs.map((r) => r.status);
+  if (statuses.includes("failed")) return { text: "failing", cls: "bad" };
+  if (statuses.includes("timeout")) return { text: "unstable", cls: "warn" };
+  if (statuses.every((s) => s === "passed")) return { text: "covered", cls: "ok" };
+  return { text: "running…", cls: "unknown" };
+}
+
+function renderOrderFlow() {
+  const tbody = $("#orderflow-table tbody");
+  if (!tbody || !state.orderFlow || state.orderFlow.error) return;
+  const spec = state.orderFlow;
+  tbody.innerHTML = "";
+  let failing = 0;
+  let covered = 0;
+  for (const req of spec.requirements) {
+    const tr = document.createElement("tr");
+
+    const reqTd = document.createElement("td");
+    reqTd.textContent = req.requirement;
+    tr.appendChild(reqTd);
+
+    const implTd = document.createElement("td");
+    const implList = document.createElement("div");
+    implList.className = "impl-list";
+    for (const entry of req.implementation) {
+      const line = document.createElement("div");
+      const ref = document.createElement("span");
+      ref.className = "mono";
+      ref.textContent = entry.ref;
+      line.appendChild(ref);
+      const what = document.createElement("span");
+      what.className = "muted";
+      what.textContent = ` — ${entry.what}`;
+      line.appendChild(what);
+      implList.appendChild(line);
+    }
+    implTd.appendChild(implList);
+    tr.appendChild(implTd);
+
+    const testsTd = document.createElement("td");
+    const chips = document.createElement("div");
+    chips.className = "suite-chips";
+    const candidates = req.tests.flatMap(suiteCandidates);
+    for (const t of candidates) chips.appendChild(suiteChip(t));
+    if (!candidates.length) chips.textContent = "–";
+    testsTd.appendChild(chips);
+    tr.appendChild(testsTd);
+
+    const status = requirementStatus(candidates);
+    if (status.cls === "bad") failing += 1;
+    if (status.cls === "ok") covered += 1;
+    const statusTd = document.createElement("td");
+    statusTd.className = "col-outcome";
+    const badge = document.createElement("span");
+    badge.className = `badge ${status.cls}`;
+    badge.textContent = status.text;
+    statusTd.appendChild(badge);
+    tr.appendChild(statusTd);
+
+    tbody.appendChild(tr);
+  }
+  const badge = $("#orderflow-status");
+  badge.textContent = failing ? `${failing} requirement(s) failing`
+    : covered ? `${covered}/${spec.requirements.length} covered`
+    : "no suites run";
+  badge.className = `badge ${failing ? "bad" : covered ? "ok" : "unknown"}`;
+
+  const flowTbody = $("#flowmap-table tbody");
+  flowTbody.innerHTML = "";
+  for (const row of spec.flow_mapping) {
+    const tr = document.createElement("tr");
+    const flowTd = document.createElement("td");
+    flowTd.textContent = row.flow;
+    tr.appendChild(flowTd);
+    for (const cell of [row.client, row.okx, row.binance]) {
+      const td = document.createElement("td");
+      td.className = "mono";
+      td.textContent = cell;
+      tr.appendChild(td);
+    }
+    flowTbody.appendChild(tr);
+  }
+
+  const stateTbody = $("#statemap-table tbody");
+  stateTbody.innerHTML = "";
+  for (const row of spec.state_mapping) {
+    const tr = document.createElement("tr");
+    const stateTd = document.createElement("td");
+    const chip = document.createElement("span");
+    chip.className = `state ${row.state}`;
+    chip.textContent = row.state;
+    stateTd.appendChild(chip);
+    tr.appendChild(stateTd);
+    const meaningTd = document.createElement("td");
+    meaningTd.textContent = row.meaning;
+    tr.appendChild(meaningTd);
+    for (const cell of [row.okx, row.binance]) {
+      const td = document.createElement("td");
+      td.className = "mono";
+      td.textContent = cell;
+      tr.appendChild(td);
+    }
+    stateTbody.appendChild(tr);
+  }
+  $("#statemap-note").textContent = spec.mapping_note;
+}
+
+async function ensureOrderFlowSpec() {
+  if (state.orderFlow) return;
+  try {
+    state.orderFlow = await fetchJson("/api/spec/order-flow");
+  } catch {
+    state.orderFlow = { error: "unavailable" };
+  }
+}
+
 /* --------------------------------------------------------------- diagrams -- */
 
 let diagramsDone = false;
@@ -711,6 +850,7 @@ async function refreshAll() {
   try { renderOrders(await fetchJson("/api/orders")); } catch { /* ignore */ }
   try { renderRisk(await fetchJson("/api/risk")); } catch { /* ignore */ }
   try { await refreshRuns(); } catch { /* ignore */ }
+  try { await ensureOrderFlowSpec(); renderOrderFlow(); } catch { /* ignore */ }
   try { await refreshPrice(); } catch { /* ignore */ }
 }
 
