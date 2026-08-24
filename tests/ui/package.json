@@ -1,0 +1,11 @@
+{
+  "name": "gateway-ui-tests",
+  "private": true,
+  "description": "jsdom harness for the monitor UI (tests/ui/*_test.js)",
+  "scripts": {
+    "test": "node orderflow_ui_test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^22.1.0"
+  }
+}
