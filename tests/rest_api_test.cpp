@@ -9,7 +9,9 @@
 #include "core/oms.hpp"
 #include "exchange/okx/okx_connector.hpp"
 #include "exchange/okx/okx_rest_client.hpp"
+#include "rest/okx_demo_routes.hpp"
 #include "rest/order_routes.hpp"
+#include "rest/risk_routes.hpp"
 
 #include <crow_all.h>
 #include <httplib.h>
@@ -144,6 +146,7 @@ class GatewayFixture
     struct Options
     {
         bool with_persistence = false;
+        bool okx_demo_trading = true;
         gateway::RiskConfig risk{};
     };
     using PreStartHook =
@@ -168,6 +171,7 @@ class GatewayFixture
         auto config = base_config();
         config.port = static_cast<int>(server_->port());
         config.ws = okx_ws_config(*ws_server_);
+        config.demo_trading = a_options.okx_demo_trading;
         connector_ = std::make_unique<OkxConnector>(
             config, [] { return std::string("2026-08-20T10:00:00.000Z"); });
 
@@ -179,6 +183,8 @@ class GatewayFixture
             [this](const ExecutionReport& a_report) { oms_->on_execution_report(a_report); });
 
         gateway::rest::register_order_routes(app_, *oms_);
+        gateway::rest::register_okx_demo_routes(app_, *connector_);
+        gateway::rest::register_risk_routes(app_, *oms_);
 
         if (a_pre_start) {
             a_pre_start(app_, *connector_, *server_, *ws_server_);
@@ -756,6 +762,91 @@ TEST_CASE("risk rejections return 400 with risk_* codes and replay deterministic
     REQUIRE(fine->status == 201);
 }
 
+TEST_CASE("GET /risk exposes the configured pre-trade limits")
+{
+    SUBCASE("defaults plus per-instrument overrides round-trip")
+    {
+        auto risk = risk_config_from_json(nlohmann::json::parse(
+            R"({"default":{"maxQty":"10","maxNotional":"1000000","maxPosition":"10"},)"
+            R"("instruments":{"BTC-USDT":{"maxQty":"5","maxNotional":"","maxPosition":"2"}}})"));
+        REQUIRE(risk.is_ok());
+        GatewayFixture fixture{
+            GatewayFixture::Options{.with_persistence = false, .risk = risk.value()}};
+
+        const auto res = fixture.client().Get("/risk");
+        REQUIRE(res->status == 200);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["default"]["maxQty"] == "10");
+        CHECK(body["default"]["maxNotional"] == "1000000");
+        CHECK(body["default"]["maxPosition"] == "10");
+        // the instrument entry replaces the defaults wholesale; an empty
+        // string means that check is disabled for the scope
+        CHECK(body["instruments"]["BTC-USDT"]["maxQty"] == "5");
+        CHECK(body["instruments"]["BTC-USDT"]["maxNotional"] == "");
+        CHECK(body["instruments"]["BTC-USDT"]["maxPosition"] == "2");
+    }
+
+    SUBCASE("no limits configured: default is null and instruments empty")
+    {
+        GatewayFixture fixture;
+
+        const auto res = fixture.client().Get("/risk");
+        REQUIRE(res->status == 200);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["default"].is_null());
+        CHECK(body["instruments"].empty());
+    }
+}
+
+TEST_CASE("rejected orders surface their rejection code and reason")
+{
+    auto risk = risk_config_from_json(nlohmann::json::parse(R"({"default":{"maxQty":"0.01"}})"));
+    REQUIRE(risk.is_ok());
+    GatewayFixture fixture{
+        GatewayFixture::Options{.with_persistence = false, .risk = risk.value()}};
+
+    const auto rejected = fixture.client().Post(
+        "/orders",
+        R"({"clientOrderId":"gw0001","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.05"})",
+        "application/json");
+    REQUIRE(rejected->status == 400);
+    CHECK(error_body(rejected)["error"]["code"] == "risk_max_qty");
+
+    // the registry view carries the recorded rejection
+    const auto view = fixture.client().Get("/orders/gw0001");
+    REQUIRE(view->status == 200);
+    const auto record = nlohmann::json::parse(view->body);
+    CHECK(record["state"] == "rejected");
+    CHECK(record["rejection"]["code"] == "risk_max_qty");
+    const std::string reason = record["rejection"]["reason"];
+    CHECK(reason.find("maxQty 0.01") != std::string::npos);
+
+    // the listing shows it too; accepted orders carry no rejection field
+    const auto fine = fixture.client().Post(
+        "/orders",
+        R"({"clientOrderId":"gw0002","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})",
+        "application/json");
+    REQUIRE(fine->status == 201);
+
+    const auto listing = fixture.client().Get("/orders");
+    REQUIRE(listing->status == 200);
+    const auto orders = nlohmann::json::parse(listing->body)["orders"];
+    bool saw_rejected = false;
+    bool saw_live = false;
+    for (const auto& entry : orders) {
+        if (entry["clientOrderId"] == "gw0001") {
+            saw_rejected = true;
+            CHECK(entry["rejection"]["code"] == "risk_max_qty");
+        }
+        if (entry["clientOrderId"] == "gw0002") {
+            saw_live = true;
+            CHECK_FALSE(entry.contains("rejection"));
+        }
+    }
+    CHECK(saw_rejected);
+    CHECK(saw_live);
+}
+
 TEST_CASE("venue errors map to structured responses")
 {
     GatewayFixture fixture;
@@ -1107,4 +1198,113 @@ TEST_CASE("restart drill: a new gateway instance recovers from the log + venue")
     app.stop();
     future.wait();
     connector.stop();
+}
+
+// ---- POST /venue/okx/demo-adjust-balance -----------------------------------
+
+namespace {
+constexpr const char* kAdjustBody =
+    R"({"type":"increase","adjustments":[{"ccy":"USDT","amt":"5000"}]})";
+} // namespace
+
+TEST_CASE("demo balance: adjustment reaches the venue end-to-end")
+{
+    GatewayFixture fixture;
+
+    const auto res =
+        fixture.client().Post("/venue/okx/demo-adjust-balance", kAdjustBody, "application/json");
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 200);
+    const auto body = nlohmann::json::parse(res->body);
+    CHECK(body["venue"] == "okx");
+    CHECK(body["type"] == "increase");
+    CHECK(body["adjustments"][0]["ccy"] == "USDT");
+    CHECK(body["adjustments"][0]["amt"] == "5000");
+    REQUIRE(body["data"].is_array());
+    CHECK(body["data"][0]["details"][0]["ccy"] == "USDT");
+    CHECK(body["data"][0]["details"][0]["bal"] == "5000");
+    CHECK(fixture.mock().demo_balance("USDT") == "5000");
+
+    // the venue saw exactly one signed POST
+    int seen = 0;
+    for (const auto& request : fixture.mock().recorded_requests()) {
+        if (request.target == "/api/v5/account/demo-adjust-balance") {
+            ++seen;
+            CHECK(request.headers.count("x-simulated-trading") == 1);
+        }
+    }
+    CHECK(seen == 1);
+}
+
+TEST_CASE("demo balance: request validation happens before any venue call")
+{
+    GatewayFixture fixture;
+
+    const auto assert_rejected = [&](const std::string& a_body, const std::string& a_reason_part) {
+        const auto res =
+            fixture.client().Post("/venue/okx/demo-adjust-balance", a_body, "application/json");
+        REQUIRE(res != nullptr);
+        REQUIRE(res->status == 400);
+        const auto body = nlohmann::json::parse(res->body);
+        CHECK(body["error"]["code"] == "invalid_request");
+        CHECK(body["error"]["reason"].get<std::string>().find(a_reason_part) != std::string::npos);
+    };
+
+    assert_rejected(R"({"type":"banana","adjustments":[{"ccy":"USDT","amt":"1"}]})",
+                    "type must be");
+    assert_rejected(R"({"type":"increase"})", "adjustments must be");
+    assert_rejected(R"({"type":"increase","adjustments":[]})", "adjustments must be");
+    assert_rejected(R"({"type":"increase","adjustments":{"ccy":"USDT","amt":"1"}})",
+                    "adjustments must be");
+    assert_rejected(R"({"type":"increase","adjustments":["USDT"]})", "must be an object");
+    assert_rejected(R"({"type":"increase","adjustments":[{"amt":"1"}]})", "ccy is required");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"","amt":"1"}]})",
+                    "ccy is required");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"USDT"}]})", "amt must be");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"USDT","amt":"-5"}]})",
+                    "amt must be");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"USDT","amt":"1.2.3"}]})",
+                    "amt must be");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"USDT","amt":"1","px":"2"}]})",
+                    "unsupported field(s)");
+    assert_rejected(R"({"type":"increase","adjustments":[{"ccy":"USDT","amt":"1"}],"venue":"okx"})",
+                    "unsupported field(s)");
+    assert_rejected("[not json", "request body must be a JSON object");
+
+    // none of the rejected requests reached the venue
+    for (const auto& request : fixture.mock().recorded_requests()) {
+        CHECK(request.target != "/api/v5/account/demo-adjust-balance");
+    }
+}
+
+TEST_CASE("demo balance: venue rejections surface as 409 venue_rejected")
+{
+    GatewayFixture fixture;
+
+    // reduce from an empty balance: the venue rejects, the gateway maps it
+    const auto res = fixture.client().Post(
+        "/venue/okx/demo-adjust-balance",
+        R"({"type":"reduce","adjustments":[{"ccy":"USDT","amt":"5000"}]})", "application/json");
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 409);
+    const auto body = nlohmann::json::parse(res->body);
+    CHECK(body["error"]["code"] == "venue_rejected");
+    CHECK(body["error"]["reason"].get<std::string>().find("insufficient") != std::string::npos);
+}
+
+TEST_CASE("demo balance: rejected when okx demo trading is disabled")
+{
+    GatewayFixture fixture{GatewayFixture::Options{.okx_demo_trading = false}};
+
+    const auto res =
+        fixture.client().Post("/venue/okx/demo-adjust-balance", kAdjustBody, "application/json");
+    REQUIRE(res != nullptr);
+    REQUIRE(res->status == 400);
+    const auto body = nlohmann::json::parse(res->body);
+    CHECK(body["error"]["code"] == "invalid_request");
+    CHECK(body["error"]["reason"].get<std::string>().find("demoTrading") != std::string::npos);
+
+    for (const auto& request : fixture.mock().recorded_requests()) {
+        CHECK(request.target != "/api/v5/account/demo-adjust-balance");
+    }
 }

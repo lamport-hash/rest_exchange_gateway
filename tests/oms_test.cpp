@@ -208,6 +208,47 @@ TEST_CASE("risk rejections are recorded and replayed")
     REQUIRE(connector.placed.empty());
 }
 
+TEST_CASE("risk_config returns the configured limits (read-only surface)")
+{
+    FakeConnector connector;
+    const auto risk = risk_config_from_json(nlohmann::json::parse(
+        R"({"default":{"maxQty":"10","maxNotional":"1000000","maxPosition":"10"},)"
+        R"("instruments":{"BTC-USDT":{"maxQty":"5","maxNotional":"","maxPosition":"2"}}})"));
+    REQUIRE(risk.is_ok());
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, risk.value()};
+
+    const auto config = oms.risk_config();
+    REQUIRE(config.defaults.has_value());
+    CHECK(config.defaults->max_qty == "10");
+    CHECK(config.defaults->max_notional == "1000000");
+    CHECK(config.defaults->max_position == "10");
+    REQUIRE(config.instruments.size() == 1);
+    const auto it = config.instruments.find("BTC-USDT");
+    REQUIRE(it != config.instruments.end());
+    CHECK(it->second.max_qty == "5");
+    CHECK(it->second.max_notional == ""); // empty = check disabled
+    CHECK(it->second.max_position == "2");
+
+    // the snapshot resolves limits exactly like the engine does
+    const auto limits = config.limits_for("BTC-USDT");
+    REQUIRE(limits.has_value());
+    CHECK(limits->max_qty == "5");
+    const auto fallback = config.limits_for("ETH-USDT"); // no entry -> defaults
+    REQUIRE(fallback.has_value());
+    CHECK(fallback->max_qty == "10");
+}
+
+TEST_CASE("risk_config with no limits configured is empty")
+{
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+
+    const auto config = oms.risk_config();
+    CHECK_FALSE(config.defaults.has_value());
+    CHECK(config.instruments.empty());
+    CHECK(config.limits_for("BTC-USDT") == std::nullopt);
+}
+
 TEST_CASE("definitive venue rejections are recorded and replayed")
 {
     FakeConnector connector;

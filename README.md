@@ -278,7 +278,12 @@ docker compose up -d                         # dev + gateway + ui + edge
   reference with field rules and curl examples from `doc/api.md`, a live
   playground that proxies hand-crafted requests to the gateway
   (`POST /api/proxy`) with status/latency/JSON-highlighted responses, and
-  an order-state distribution chart), **Diagrams** (architecture, order
+  an order-state distribution chart), **Balance** (OKX demo-trading
+  balance adjustments through the gateway), **Risk** (read-only view of
+  the active pre-trade limits via `GET /risk` — defaults plus
+  per-instrument overrides, fixed by the config file at startup — and the
+  recent `risk_*` rejections with their recorded reasons from the order
+  registry), **Diagrams** (architecture, order
   state machine, place idempotency and restart-recovery mermaid diagrams,
   rendered offline from a vendored `mermaid.min.js`), and **Tests** — all
   21 ctest suites in both presets (debug = ASan+UBSan), the black-box

@@ -16,6 +16,7 @@ constexpr const char* kPathAmend = "/api/v5/trade/amend-order";
 constexpr const char* kPathOrderInfo = "/api/v5/trade/order";
 constexpr const char* kPathOrdersPending = "/api/v5/trade/orders-pending";
 constexpr const char* kPathTicker = "/api/v5/market/ticker";
+constexpr const char* kPathDemoAdjustBalance = "/api/v5/account/demo-adjust-balance";
 
 auto string_field(const nlohmann::json& a_node, const char* a_name) -> std::optional<std::string>
 {
@@ -215,8 +216,9 @@ OkxRestClient::OkxRestClient(OkxConfig a_config, TimestampProvider a_timestamp)
       timestamp_(a_timestamp ? std::move(a_timestamp) : TimestampProvider{&utc_now_iso_ms})
 {}
 
-auto OkxRestClient::signed_request(const char* a_method, const std::string& a_path,
-                                   const std::string& a_body) const -> Result<nlohmann::json>
+auto OkxRestClient::signed_request_raw(const char* a_method, const std::string& a_path,
+                                       const std::string& a_body) const
+    -> Result<std::pair<int, std::string>>
 {
     const std::string timestamp = timestamp_();
 
@@ -236,12 +238,21 @@ auto OkxRestClient::signed_request(const char* a_method, const std::string& a_pa
     if (result == nullptr) {
         return Error{"transport", "network failure talking to " + config_.host};
     }
-    if (result->status != 200) {
-        return Error{"transport", "unexpected HTTP status " + std::to_string(result->status) +
+    return std::make_pair(result->status, result->body);
+}
+
+auto OkxRestClient::signed_request(const char* a_method, const std::string& a_path,
+                                   const std::string& a_body) const -> Result<nlohmann::json>
+{
+    const auto raw = signed_request_raw(a_method, a_path, a_body);
+    if (!raw.is_ok()) {
+        return raw.error();
+    }
+    if (raw.value().first != 200) {
+        return Error{"transport", "unexpected HTTP status " + std::to_string(raw.value().first) +
                                       " from " + a_path};
     }
-
-    return parse_envelope(result->body, a_path);
+    return parse_envelope(raw.value().second, a_path);
 }
 auto OkxRestClient::place_order(const OkxPlaceRequest& a_request) const -> Result<OkxOrderAck>
 {
@@ -322,6 +333,33 @@ auto OkxRestClient::get_orders_pending() const -> Result<std::vector<OkxOrderInf
         pending.push_back(parse_order_info(item));
     }
     return pending;
+}
+
+auto OkxRestClient::adjust_demo_balance(const OkxDemoBalanceRequest& a_request) const
+    -> Result<nlohmann::json>
+{
+    // Unlike the trade endpoints, this venue reports business rejections
+    // with a non-200 HTTP status (e.g. 400 + envelope code 51000/59693):
+    // parse the envelope before declaring a transport failure so those
+    // surface as "venue:<code>", not 502.
+    const auto raw = signed_request_raw("POST", kPathDemoAdjustBalance, to_json(a_request).dump());
+    if (!raw.is_ok()) {
+        return raw.error();
+    }
+    const auto& [status, body] = raw.value();
+    if (status != 200) {
+        const auto envelope = parse_envelope(body, kPathDemoAdjustBalance);
+        if (!envelope.is_ok() && envelope.error().code.rfind("venue:", 0) == 0) {
+            return envelope.error();
+        }
+        return Error{"transport", "unexpected HTTP status " + std::to_string(status) + " from " +
+                                      std::string{kPathDemoAdjustBalance}};
+    }
+    const auto envelope = parse_envelope(body, kPathDemoAdjustBalance);
+    if (!envelope.is_ok()) {
+        return envelope.error();
+    }
+    return envelope.value().at("data");
 }
 
 auto OkxRestClient::get_ticker(const std::string& a_instrument_id) const -> Result<std::string>

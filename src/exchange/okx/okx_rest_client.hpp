@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace gateway::exchange::okx {
 
@@ -85,7 +86,23 @@ class OkxRestClient
     /// an instrument, verbatim decimal string.
     [[nodiscard]] auto get_ticker(const std::string& a_instrument_id) const -> Result<std::string>;
 
+    /// POST /api/v5/account/demo-adjust-balance (demo trading accounts
+    /// only): increase/reduce the demo account balance per currency
+    /// (type "increase"|"reduce"). Unlike the trade endpoints, the venue
+    /// reports business rejections with a non-200 status + error
+    /// envelope; those are surfaced as "venue:<code>". Returns the
+    /// venue's envelope "data" array verbatim ({remainCnt, totalCnt,
+    /// details}). Error codes: "transport", "protocol", "venue:<sCode>".
+    [[nodiscard]] auto
+    adjust_demo_balance(const OkxDemoBalanceRequest& a_request) const -> Result<nlohmann::json>;
+
   private:
+    /// Signed request returning the raw HTTP status + body (no envelope
+    /// validation).
+    [[nodiscard]] auto
+    signed_request_raw(const char* a_method, const std::string& a_path,
+                       const std::string& a_body) const -> Result<std::pair<int, std::string>>;
+
     [[nodiscard]] auto signed_request(const char* a_method, const std::string& a_path,
                                       const std::string& a_body) const -> Result<nlohmann::json>;
 

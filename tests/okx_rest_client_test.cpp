@@ -6,6 +6,8 @@
 
 #include "exchange/okx/okx_rest_client.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <string>
 
 namespace {
@@ -402,6 +404,137 @@ TEST_CASE("get_ticker returns the last price of a public instrument")
         }
     }
     CHECK_FALSE(has_auth_header);
+}
+
+TEST_CASE("adjust_demo_balance posts the documented body (normal path)")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+        .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+    REQUIRE(result.is_ok());
+    REQUIRE(result.value().is_array());
+    REQUIRE(result.value().size() == 1);
+    // documented shape: {remainCnt, totalCnt, details:[{ccy, amt, bal}]}
+    CHECK(result.value().at(0).at("remainCnt") == "2");
+    CHECK(result.value().at(0).at("totalCnt") == "3");
+    CHECK(result.value().at(0).at("details").at(0).at("ccy") == "USDT");
+    CHECK(result.value().at(0).at("details").at(0).at("amt") == "5000");
+    CHECK(result.value().at(0).at("details").at(0).at("bal") == "5000");
+    CHECK(server.demo_balance("USDT") == "5000");
+
+    // signed demo request: path, body and simulated-trading header
+    const auto recorded = server.recorded_requests();
+    REQUIRE(recorded.size() == 1);
+    CHECK(recorded.front().method == "POST");
+    CHECK(recorded.front().target == "/api/v5/account/demo-adjust-balance");
+    CHECK(recorded.front().headers.count("x-simulated-trading") == 1);
+    const auto body = nlohmann::json::parse(recorded.front().body);
+    CHECK(body.at("type") == "increase");
+    CHECK(body.at("adjustments").at(0).at("ccy") == "USDT");
+    CHECK(body.at("adjustments").at(0).at("amt") == "5000");
+}
+
+TEST_CASE("adjust_demo_balance applies increases and reduces exactly once")
+{
+    OkxMockServer server(base_config());
+    server.set_demo_balance("USDT", "100");
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    REQUIRE(client
+                .adjust_demo_balance(OkxDemoBalanceRequest{
+                    .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "50"}}})
+                .is_ok());
+    CHECK(server.demo_balance("USDT") == "150");
+    CHECK(client
+              .adjust_demo_balance(OkxDemoBalanceRequest{
+                  .type = "reduce", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "20"}}})
+              .is_ok());
+    CHECK(server.demo_balance("USDT") == "130");
+}
+
+TEST_CASE("adjust_demo_balance error paths")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    SUBCASE("reduce below the balance is a venue error (HTTP 400 + envelope)")
+    {
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "reduce", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:59693");
+        CHECK(result.error().message.find("insufficient") != std::string::npos);
+        // nothing was applied
+        CHECK(server.demo_balance("USDT").empty());
+    }
+
+    SUBCASE("exhausted daily increase quota is a venue rate-limit error")
+    {
+        server.set_demo_increase_quota(0);
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:50011");
+        CHECK(server.demo_balance("USDT").empty());
+    }
+
+    SUBCASE("over-cap increase is a venue parameter error")
+    {
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5001"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:51000");
+    }
+
+    SUBCASE("unsupported currency is a venue parameter error")
+    {
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"DOGE", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:51000");
+    }
+
+    SUBCASE("unknown type is a venue parameter error")
+    {
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "banana", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:51000");
+        CHECK(result.error().message.find("Parameter type error") != std::string::npos);
+    }
+
+    SUBCASE("malformed venue response is a protocol error")
+    {
+        server.set_next_raw_response(200, "[not json");
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "protocol");
+    }
+
+    SUBCASE("non-200 without a venue envelope stays a transport error")
+    {
+        server.set_next_raw_response(500, R"({"oops":1})");
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "transport");
+        CHECK(result.error().message.find("500") != std::string::npos);
+    }
+
+    SUBCASE("network failure is a transport error")
+    {
+        server.drop_next_request();
+        const auto result = client.adjust_demo_balance(OkxDemoBalanceRequest{
+            .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "1"}}});
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "transport");
+    }
 }
 
 TEST_CASE("get_ticker error paths")

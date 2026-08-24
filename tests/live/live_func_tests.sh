@@ -690,6 +690,26 @@ if wait_log "\"clientOrderId\":\"$ID_E\".*\"state\":\"canceled\"" 25; then
 else
     bad "no WS cancel report for $ID_E"
 fi
+
+# ---- 18b. OKX demo-trading balance adjustment (demo accounts only) ------
+if [ "$VENUE" = "okx" ] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$WORK/gateway.json')).get('okx',{}).get('demoTrading') else 1)"; then
+    echo "== 18b. OKX demo balance adjustment (demo-adjust-balance) =="
+    gw POST /venue/okx/demo-adjust-balance \
+        '{"type":"increase","adjustments":[{"ccy":"USDT","amt":"1"}]}'
+    assert_eq "demo balance increase -> 200" "200" "$STATUS"
+    assert_eq "venue echoed" "okx" "$(json_field "$BODY" venue)"
+    gw POST /venue/okx/demo-adjust-balance \
+        '{"type":"reduce","adjustments":[{"ccy":"USDT","amt":"1"}]}'
+    assert_eq "demo balance reduce (restored) -> 200" "200" "$STATUS"
+    gw POST /venue/okx/demo-adjust-balance \
+        '{"type":"banana","adjustments":[{"ccy":"USDT","amt":"1"}]}'
+    assert_eq "invalid type rejected gateway-side -> 400" "400" "$STATUS"
+    gw POST /venue/okx/demo-adjust-balance \
+        '{"type":"increase","adjustments":[{"ccy":"USDT","amt":"-5"}]}'
+    assert_eq "negative amt rejected gateway-side -> 400" "400" "$STATUS"
+else
+    echo "== 18b. demo balance adjustment skipped (okx demo trading only) =="
+fi
 stop_gateway
 
 # ---- 19. venue unreachable: retry budget -> 502 ----------------------------

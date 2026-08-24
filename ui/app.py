@@ -362,6 +362,66 @@ def price(symbol: str = "BTC-USDT", venue: str | None = None) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=200)
 
 
+@app.get("/api/risk")
+def risk() -> JSONResponse:
+    """Active pre-trade risk limits served by the gateway (Risk tab).
+
+    Read-only: limits are fixed by the config file at gateway startup.
+    """
+    try:
+        _, body = _gateway_get("/risk", timeout=4.0)
+        return JSONResponse(body)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=200)
+
+
+class _DemoBalanceRequest(BaseModel):
+    type: str
+    ccy: str
+    amt: str
+
+
+@app.post("/api/okx/demo-balance")
+def okx_demo_balance(req: _DemoBalanceRequest) -> JSONResponse:
+    """Forward one OKX demo-balance adjustment to the gateway (Balance tab).
+
+    The gateway validates the shape again and refuses with 400 when OKX
+    demo trading is disabled; venue rejections come back as 409.
+    """
+    if req.type not in ("increase", "reduce"):
+        raise HTTPException(status_code=400, detail="type must be increase or reduce")
+    if not req.ccy.strip():
+        raise HTTPException(status_code=400, detail="ccy is required")
+    payload = json.dumps(
+        {"type": req.type, "adjustments": [{"ccy": req.ccy.strip(), "amt": req.amt.strip()}]}
+    ).encode()
+    request = urllib.request.Request(  # noqa: S310 - fixed gateway base URL
+        GATEWAY_URL + "/venue/okx/demo-adjust-balance", data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=15.0) as resp:
+            status, raw = resp.status, resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as exc:
+        status, raw = exc.code, exc.read().decode(errors="replace")
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "status": None,
+             "latency_ms": round((time.perf_counter() - started) * 1000),
+             "error": f"gateway unreachable: {exc}"}
+        )
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = raw
+    return JSONResponse(
+        {"ok": status < 300, "status": status,
+         "latency_ms": round((time.perf_counter() - started) * 1000),
+         "body": parsed}
+    )
+
+
 # ------------------------------------------------------------- api playground ---
 
 _PROXY_METHODS = {"GET", "POST", "PUT", "DELETE"}
@@ -371,6 +431,9 @@ class _ProxyRequest(BaseModel):
     method: str
     path: str
     body: str | None = None
+
+
+_PROXY_PATH_PREFIXES = ("/orders", "/price", "/risk", "/health", "/venue/okx/demo-adjust-balance")
 
 
 @app.post("/api/proxy")
@@ -387,8 +450,11 @@ def proxy(req: _ProxyRequest) -> JSONResponse:
     path = req.path
     if not path.startswith("/") or ".." in path or "://" in path:
         raise HTTPException(status_code=400, detail="path must be an absolute gateway path")
-    if not path.startswith(("/orders", "/health", "/price")):
-        raise HTTPException(status_code=400, detail="path must target /orders, /price or /health")
+    if not path.startswith(_PROXY_PATH_PREFIXES):
+        raise HTTPException(
+            status_code=400,
+            detail="path must target /orders, /price, /risk, /health or /venue/okx/demo-adjust-balance",
+        )
 
     data = None
     if method in ("POST", "PUT"):

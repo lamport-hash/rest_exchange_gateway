@@ -104,6 +104,41 @@ TEST_CASE("to_query encodes both parameters")
     CHECK(to_query(query) == "instId=BTC-USDT&clOrdId=gw-0001");
 }
 
+TEST_CASE("to_json builds the demo-balance body with one adjustment")
+{
+    const OkxDemoBalanceRequest request{.type = "increase",
+                                        .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}};
+    const auto json = to_json(request);
+    REQUIRE(json.size() == 2);
+    CHECK(json.at("type") == "increase");
+    REQUIRE(json.at("adjustments").is_array());
+    REQUIRE(json.at("adjustments").size() == 1);
+    CHECK(json.at("adjustments").at(0).at("ccy") == "USDT");
+    CHECK(json.at("adjustments").at(0).at("amt") == "5000");
+}
+
+TEST_CASE("to_json keeps multiple adjustments in order")
+{
+    const OkxDemoBalanceRequest request{.type = "reduce",
+                                        .adjustments = {OkxDemoBalanceAdjustment{"USDT", "100.5"},
+                                                        OkxDemoBalanceAdjustment{"BTC", "0.001"}}};
+    const auto json = to_json(request);
+    CHECK(json.at("type") == "reduce");
+    REQUIRE(json.at("adjustments").size() == 2);
+    CHECK(json.at("adjustments").at(0).at("ccy") == "USDT");
+    CHECK(json.at("adjustments").at(0).at("amt") == "100.5");
+    CHECK(json.at("adjustments").at(1).at("ccy") == "BTC");
+    CHECK(json.at("adjustments").at(1).at("amt") == "0.001");
+}
+
+TEST_CASE("to_json demo-balance body carries decimals verbatim")
+{
+    // no float round-trip: trailing zeros and precision are preserved
+    const OkxDemoBalanceRequest request{
+        .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "0.100000000"}}};
+    CHECK(to_json(request).at("adjustments").at(0).at("amt") == "0.100000000");
+}
+
 TEST_CASE("to_query percent-encodes reserved characters")
 {
     const OkxQuery query{.inst_id = "BTC USDT/1", .cl_ord_id = "a+b&c=d"};

@@ -142,6 +142,7 @@ function renderOrders(data) {
     tbody.appendChild(tr);
   }
   renderStateChart();
+  renderRejections();
 }
 
 /* ------------------------------------------------------ state visualization -- */
@@ -242,6 +243,29 @@ const ENDPOINTS = [
     ],
     body: null,
     example: `200 {"symbol":"BTC-USDT","venue":"OKX","price":"61750.5"}`,
+  },
+  {
+    id: "risk", label: "GET /risk — active pre-trade limits", method: "GET", path: "/risk",
+    description: "Read-only view of the pre-trade risk limits, fixed by the config file at startup. " +
+      "An instrument entry replaces the defaults wholesale; an empty string disables that check for the scope. " +
+      "Rejected orders carry their reason in GET /orders records as rejection:{code,reason}.",
+    fields: [],
+    body: null,
+    example: `200 {"default":{"maxQty":"10","maxNotional":"1000000","maxPosition":"10"},
+     "instruments":{"BTC-USDT":{"maxQty":"5","maxNotional":"","maxPosition":"2"}}}`,
+  },
+  {
+    id: "okx-demo-balance", label: "POST /venue/okx/demo-adjust-balance — OKX demo balance",
+    method: "POST", path: "/venue/okx/demo-adjust-balance",
+    description: "Venue-specific passthrough to OKX POST /api/v5/account/demo-adjust-balance " +
+      "(demo trading accounts only; 400 when okx.demoTrading is off). Currencies BTC/ETH/USDT/OKB; " +
+      "increase quota 3/day (UTC). One signed request, never retried.",
+    fields: [
+      ["type", "required", "increase | reduce (venue spelling)"],
+      ["adjustments", "required", "non-empty array of {ccy, amt}; duplicate ccys rejected; amt plain decimal"],
+    ],
+    body: JSON.stringify({ type: "increase", adjustments: [{ ccy: "USDT", amt: "5000" }] }, null, 2),
+    example: `200 {"venue":"okx","type":"increase","adjustments":[{"ccy":"USDT","amt":"5000"}],"data":[…]}`,
   },
 ];
 
@@ -351,6 +375,118 @@ function renderEndpoints() {
     ex.textContent = ep.example;
     card.appendChild(ex);
     cards.appendChild(card);
+  }
+}
+
+/* -------------------------------------------------------- okx demo balance -- */
+
+function initBalanceControls() {
+  const send = $("#bal-send");
+  if (!send) return;
+  send.onclick = async () => {
+    const statusEl = $("#bal-status");
+    const pre = $("#bal-response");
+    statusEl.textContent = "…";
+    statusEl.className = "badge unknown";
+    $("#bal-latency").textContent = "";
+    try {
+      const data = await fetchJson("/api/okx/demo-balance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: $("#bal-type").value,
+          ccy: $("#bal-ccy").value.trim(),
+          amt: $("#bal-amt").value.trim(),
+        }),
+      });
+      if (!data.ok && data.status == null) {
+        statusEl.textContent = "unreachable";
+        statusEl.className = "badge bad";
+        $("#bal-latency").textContent = `${data.latency_ms} ms`;
+        pre.textContent = data.error;
+        return;
+      }
+      statusEl.textContent = `HTTP ${data.status}`;
+      statusEl.className = `badge ${data.status < 300 ? "ok" : data.status < 500 ? "warn" : "bad"}`;
+      $("#bal-latency").textContent = `${data.latency_ms} ms`;
+      const text = typeof data.body === "string" ? data.body : JSON.stringify(data.body, null, 2);
+      pre.innerHTML = highlightJson(text);
+    } catch (e) {
+      statusEl.textContent = "error";
+      statusEl.className = "badge bad";
+      pre.textContent = String(e);
+    }
+  };
+}
+
+/* ------------------------------------------------------------------- risk -- */
+
+function renderRisk(data) {
+  const tbody = $("#risk-table tbody");
+  if (!tbody) return;
+  const badge = $("#risk-status");
+  tbody.innerHTML = "";
+  if (data.error) {
+    badge.textContent = "unreachable";
+    badge.className = "badge bad";
+    $("#risk-empty").style.display = "none";
+    return;
+  }
+  const def = data.default;
+  const instruments = data.instruments || {};
+  const symbols = Object.keys(instruments).sort();
+  const noneConfigured = !def && symbols.length === 0;
+  $("#risk-empty").style.display = noneConfigured ? "block" : "none";
+  badge.textContent = noneConfigured ? "checks disabled" : "enforced";
+  badge.className = `badge ${noneConfigured ? "warn" : "ok"}`;
+
+  const limitCell = (value) => {
+    const td = document.createElement("td");
+    td.textContent = value || "—";
+    td.className = value ? "mono" : "muted";
+    return td;
+  };
+  const rows = [];
+  if (def) rows.push(["default (every instrument)", def]);
+  for (const s of symbols) rows.push([s, instruments[s]]);
+  for (const [scope, limits] of rows) {
+    const tr = document.createElement("tr");
+    const scopeTd = document.createElement("td");
+    scopeTd.textContent = scope;
+    tr.appendChild(scopeTd);
+    tr.appendChild(limitCell(limits.maxQty));
+    tr.appendChild(limitCell(limits.maxNotional));
+    tr.appendChild(limitCell(limits.maxPosition));
+    tbody.appendChild(tr);
+  }
+}
+
+function renderRejections() {
+  const tbody = $("#rejections-table tbody");
+  if (!tbody) return;
+  const rejected = state.orders.filter(
+    (o) => o.state === "rejected" && o.rejection && String(o.rejection.code).startsWith("risk_"));
+  tbody.innerHTML = "";
+  $("#rejections-empty").style.display = rejected.length ? "none" : "block";
+  $("#rejections-count").textContent = rejected.length ? `${rejected.length} risk-rejected order(s)` : "";
+  for (const o of rejected) {
+    const tr = document.createElement("tr");
+    for (const c of [o.clientOrderId, o.venue, o.symbol, o.side, o.quantity]) {
+      const td = document.createElement("td");
+      td.textContent = c;
+      tr.appendChild(td);
+    }
+    const codeTd = document.createElement("td");
+    const chip = document.createElement("span");
+    chip.className = "state rejected";
+    chip.textContent = o.rejection.code;
+    codeTd.appendChild(chip);
+    tr.appendChild(codeTd);
+    const reasonTd = document.createElement("td");
+    reasonTd.className = "muted";
+    reasonTd.textContent = o.rejection.reason;
+    tr.appendChild(reasonTd);
+    tbody.appendChild(tr);
   }
 }
 
@@ -573,6 +709,7 @@ async function refreshRuns() {
 async function refreshAll() {
   try { renderGateway(await fetchJson("/api/gateway/status")); } catch { /* gateway down */ }
   try { renderOrders(await fetchJson("/api/orders")); } catch { /* ignore */ }
+  try { renderRisk(await fetchJson("/api/risk")); } catch { /* ignore */ }
   try { await refreshRuns(); } catch { /* ignore */ }
   try { await refreshPrice(); } catch { /* ignore */ }
 }
@@ -580,6 +717,7 @@ async function refreshAll() {
 async function init() {
   initTabs();
   initPriceControls();
+  initBalanceControls();
   renderEndpoints();
   const data = await fetchJson("/api/tests");
   state.tests = data.tests || [];

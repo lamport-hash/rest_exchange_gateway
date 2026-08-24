@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace gateway::exchange::okx {
 
@@ -40,6 +41,25 @@ struct OkxQuery
 {
     std::string inst_id;
     std::string cl_ord_id;
+};
+
+/// One currency adjustment of POST /api/v5/account/demo-adjust-balance.
+struct OkxDemoBalanceAdjustment
+{
+    /// Currency, e.g. "USDT".
+    std::string ccy;
+    /// Plain decimal string carried verbatim to the venue.
+    std::string amt;
+};
+
+/// POST /api/v5/account/demo-adjust-balance request body (demo trading
+/// accounts only; supported currencies BTC/ETH/USDT/OKB, increases are
+/// quota-limited by the venue).
+struct OkxDemoBalanceRequest
+{
+    /// "increase" or "reduce" (venue spelling).
+    std::string type;
+    std::vector<OkxDemoBalanceAdjustment> adjustments;
 };
 
 struct OkxOrderAck
@@ -77,6 +97,9 @@ struct OkxOrderInfo
 /// URL-encoded query string (without leading '?') for GET
 /// /api/v5/trade/order.
 [[nodiscard]] auto to_query(const OkxQuery& a_query) -> std::string;
+
+/// POST /api/v5/account/demo-adjust-balance request body.
+[[nodiscard]] auto to_json(const OkxDemoBalanceRequest& a_request) -> nlohmann::json;
 
 /// Parse one element of the envelope "data" array of trade endpoints.
 /// Missing optional fields default to empty strings; type mismatches are

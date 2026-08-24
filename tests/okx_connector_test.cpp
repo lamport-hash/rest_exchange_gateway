@@ -652,4 +652,63 @@ TEST_CASE("get_price serves public market data through the connector interface")
     }
 }
 
+TEST_CASE("adjust_demo_balance forwards the adjustment on a demo connector")
+{
+    OkxMockServer server(base_config());
+    server.set_demo_balance("USDT", "1000");
+    server.start();
+    auto connector = make_connector(server);
+
+    const auto result = connector.adjust_demo_balance(OkxDemoBalanceRequest{
+        .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+    REQUIRE(result.is_ok());
+    CHECK(server.demo_balance("USDT") == "6000");
+    CHECK(count_recorded(server, "POST", "/api/v5/account/demo-adjust-balance") == 1);
+}
+
+TEST_CASE("adjust_demo_balance is rejected without network I/O when demo trading is off")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    auto config = base_config();
+    config.port = static_cast<int>(server.port());
+    config.demo_trading = false;
+    OkxConnector connector{config, [] { return std::string("2026-08-20T10:00:00.000Z"); }};
+
+    const auto result = connector.adjust_demo_balance(OkxDemoBalanceRequest{
+        .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+    REQUIRE_FALSE(result.is_ok());
+    CHECK(result.error().code == "invalid_request");
+    CHECK(result.error().message.find("demoTrading") != std::string::npos);
+    CHECK(server.recorded_requests().empty());
+}
+
+TEST_CASE("adjust_demo_balance never retries a transport failure")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    auto connector = make_connector(server);
+
+    // Non-idempotent venue call: a dropped response must surface as a
+    // single transport error, never a re-send (it could double-apply).
+    server.drop_next_request();
+    const auto result = connector.adjust_demo_balance(OkxDemoBalanceRequest{
+        .type = "increase", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+    REQUIRE_FALSE(result.is_ok());
+    CHECK(result.error().code == "transport");
+    CHECK(count_recorded(server, "POST", "/api/v5/account/demo-adjust-balance") == 1);
+}
+
+TEST_CASE("adjust_demo_balance surfaces venue rejections")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    auto connector = make_connector(server);
+
+    const auto result = connector.adjust_demo_balance(OkxDemoBalanceRequest{
+        .type = "reduce", .adjustments = {OkxDemoBalanceAdjustment{"USDT", "5000"}}});
+    REQUIRE_FALSE(result.is_ok());
+    CHECK(result.error().code == "venue:59693");
+}
+
 } // namespace

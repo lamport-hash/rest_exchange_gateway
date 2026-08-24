@@ -41,6 +41,15 @@ class OkxConnector final : public ExchangeConnector
     [[nodiscard]] auto
     get_price(const std::string& a_instrument_id) -> Result<std::string> override;
 
+    /// OKX-specific helper outside ExchangeConnector: POST
+    /// /api/v5/account/demo-adjust-balance. Fails fast with
+    /// "invalid_request" when demo trading is disabled (the venue
+    /// endpoint only exists for demo accounts). Non-idempotent: exactly
+    /// one attempt, never retried — a retried increase/reduce could
+    /// double-apply. Returns the venue's data array verbatim.
+    [[nodiscard]] auto
+    adjust_demo_balance(const OkxDemoBalanceRequest& a_request) -> Result<nlohmann::json>;
+
     void
     set_execution_report_handler(std::function<void(const ExecutionReport&)> a_handler) override;
     void set_connectivity_handler(std::function<void(bool)> a_handler) override;

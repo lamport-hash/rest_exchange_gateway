@@ -18,6 +18,8 @@
   <nav id="tabs">
     <button class="tab active" data-tab="monitor">Monitor</button>
     <button class="tab" data-tab="api">API</button>
+    <button class="tab" data-tab="balance">Balance</button>
+    <button class="tab" data-tab="risk">Risk</button>
     <button class="tab" data-tab="diagrams">Diagrams</button>
     <button class="tab" data-tab="tests">Tests</button>
   </nav>
@@ -125,6 +127,74 @@ curl -s localhost:8080/orders/ui0001 -X PUT -H 'Content-Type: application/json' 
      -d '{ "price": "30100", "quantity": "0.02" }'  # amend
 curl -s localhost:8080/orders/ui0001 -X DELETE      # cancel (idempotent)
 curl -s localhost:8080/health</pre>
+    </section>
+  </div>
+
+  <!-- =============================================================== balance -->
+  <div id="tab-balance" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>OKX demo balance</h2>
+        <span class="muted">POST /api/v5/account/demo-adjust-balance via the gateway — OKX demo trading accounts only</span>
+      </div>
+      <div id="balance-form">
+        <div class="bal-controls">
+          <select id="bal-type">
+            <option value="increase">increase</option>
+            <option value="reduce">reduce</option>
+          </select>
+          <input id="bal-ccy" class="mono" value="USDT" spellcheck="false" title="currency: BTC, ETH, USDT or OKB">
+          <input id="bal-amt" class="mono" value="5000" spellcheck="false" title="amount (plain decimal)">
+          <button id="bal-send">Adjust balance</button>
+        </div>
+        <div class="muted">venue rules: currencies BTC/ETH/USDT/OKB · increase caps per request: BTC 1, ETH 1, USDT 5000, OKB 100 · increase quota 3/day (UTC), reduce unlimited</div>
+      </div>
+      <div id="bal-result">
+        <div class="pg-meta">
+          <span id="bal-status" class="badge unknown">–</span>
+          <span id="bal-latency" class="muted"></span>
+        </div>
+        <pre id="bal-response" class="json">no adjustment sent yet</pre>
+      </div>
+    </section>
+  </div>
+
+  <!-- ================================================================== risk -->
+  <div id="tab-risk" class="tab-panel">
+    <section>
+      <div class="section-head">
+        <h2>Pre-trade risk limits</h2>
+        <span id="risk-status" class="badge unknown">–</span>
+        <span class="muted">read-only — fixed by the config file at gateway startup (edit config + restart to change)</span>
+      </div>
+      <table id="risk-table">
+        <thead>
+          <tr><th>scope</th><th>maxQty</th><th>maxNotional</th><th>maxPosition</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="risk-empty" class="muted" style="display:none">no limits configured — every pre-trade check is disabled</div>
+      <div id="risk-note" class="muted">
+        “—” disables that check for the scope · a per-instrument row replaces the defaults wholesale (no field merge) ·
+        market orders skip maxNotional (no pre-trade price feed) · position limits span venues per instrument
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Recent risk rejections</h2>
+        <span id="rejections-count" class="muted"></span>
+      </div>
+      <table id="rejections-table">
+        <thead>
+          <tr>
+            <th>clientOrderId</th><th>venue</th><th>symbol</th><th>side</th>
+            <th>qty</th><th>code</th><th>reason</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="rejections-empty" class="muted">no risk-rejected orders in the registry</div>
     </section>
   </div>
 

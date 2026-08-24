@@ -67,6 +67,16 @@ class OkxMockServer
     /// (defaults BTC-USDT @ 50000). Any other instId is rejected with
     /// "51001" like live OKX.
     void set_ticker(const std::string& a_inst_id, const std::string& a_last_price);
+    /// Seed the demo balance of a currency (POST
+    /// /api/v5/account/demo-adjust-balance state); currencies never
+    /// touched start at 0.
+    void set_demo_balance(const std::string& a_ccy, const std::string& a_amt);
+    /// Script the remaining daily demo-increase quota (live default 3;
+    /// reduce requests do not consume it).
+    void set_demo_increase_quota(int a_remaining);
+    /// Current demo balance of a currency as a plain decimal string;
+    /// "" when the currency was never adjusted/seeded.
+    [[nodiscard]] auto demo_balance(const std::string& a_ccy) const -> std::string;
     /// One-shot fault injection: the next request gets a raw response instead
     /// of the normal envelope.
     void set_next_raw_response(int a_status, std::string a_body);
@@ -128,6 +138,10 @@ class OkxMockServer
     bool drop_next_response_ = false;
     unsigned delay_next_ms_ = 0;
     std::unordered_map<std::string, MockOrder> orders_;
+    /// Demo balances by currency, scaled by 1e8 (demo-adjust-balance).
+    std::unordered_map<std::string, long long> demo_balances_;
+    /// Remaining daily demo-increase quota (live default: 3/day).
+    int demo_increase_quota_ = 3;
     std::vector<RecordedRequest> recorded_;
     long long ord_counter_ = 0;
     mutable std::mutex mutex_;

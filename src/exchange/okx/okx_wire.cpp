@@ -89,6 +89,16 @@ auto to_query(const OkxQuery& a_query) -> std::string
     return "instId=" + url_encode(a_query.inst_id) + "&clOrdId=" + url_encode(a_query.cl_ord_id);
 }
 
+auto to_json(const OkxDemoBalanceRequest& a_request) -> nlohmann::json
+{
+    nlohmann::json adjustments = nlohmann::json::array();
+    adjustments.get_ref<nlohmann::json::array_t&>().reserve(a_request.adjustments.size());
+    for (const auto& adjustment : a_request.adjustments) {
+        adjustments.push_back({{"ccy", adjustment.ccy}, {"amt", adjustment.amt}});
+    }
+    return {{"type", a_request.type}, {"adjustments", std::move(adjustments)}};
+}
+
 auto parse_order_ack(const nlohmann::json& a_item) -> OkxOrderAck
 {
     return {.ord_id = field_string(a_item, "ordId"),

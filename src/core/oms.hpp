@@ -184,6 +184,11 @@ class OrderManagementSystem
 
     [[nodiscard]] auto stats() const -> OmsStats;
 
+    /// Active pre-trade risk limits (copy taken under the lock). Serves
+    /// the read-only GET /risk surface; limits are fixed by the config
+    /// file at startup and never mutated at runtime.
+    [[nodiscard]] auto risk_config() const -> RiskConfig;
+
     /// Execution-report sink (connector worker threads).
     void on_execution_report(const ExecutionReport& a_report);
 

@@ -90,8 +90,10 @@ target_link_libraries(gateway_binance PUBLIC gateway_core)
 
 add_library(gateway_rest STATIC
     src/rest/order_routes.cpp
+    src/rest/okx_demo_routes.cpp
+    src/rest/risk_routes.cpp
 )
-target_link_libraries(gateway_rest PUBLIC gateway_core)
+target_link_libraries(gateway_rest PUBLIC gateway_core gateway_okx)
 
 if(GATEWAY_BUILD_TESTS)
     enable_testing()

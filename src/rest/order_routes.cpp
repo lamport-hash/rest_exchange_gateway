@@ -1,5 +1,7 @@
 #include "rest/order_routes.hpp"
 
+#include "rest/route_support.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -15,51 +17,12 @@ namespace {
 
 constexpr std::size_t kMaxClientOrderIdLength = 32;
 
-auto json_response(int a_status, const nlohmann::json& a_body) -> crow::response
-{
-    crow::response res{a_status, a_body.dump()};
-    res.set_header("Content-Type", "application/json");
-    return res;
-}
-
-auto error_response(int a_status, std::string_view a_code, std::string_view a_reason,
-                    std::string_view a_client_order_id) -> crow::response
-{
-    const nlohmann::json body = {
-        {"error", {{"code", a_code}, {"reason", a_reason}, {"clientOrderId", a_client_order_id}}}};
-    return json_response(a_status, body);
-}
-
-auto internal_error_response(std::string_view a_client_order_id = "") -> crow::response
-{
-    return error_response(500, "internal", "unexpected server error", a_client_order_id);
-}
-
 auto to_lower(std::string_view a_text) -> std::string
 {
     std::string lower{a_text};
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char a_c) { return static_cast<char>(std::tolower(a_c)); });
     return lower;
-}
-
-auto is_decimal(std::string_view a_text) -> bool
-{
-    if (a_text.empty() || a_text.front() == '.') {
-        return false;
-    }
-    bool dot_seen = false;
-    for (const char c : a_text) {
-        if (c == '.') {
-            if (dot_seen) {
-                return false;
-            }
-            dot_seen = true;
-        } else if (c < '0' || c > '9') {
-            return false;
-        }
-    }
-    return a_text.back() != '.';
 }
 
 auto is_valid_client_order_id(std::string_view a_id) -> bool
@@ -123,109 +86,29 @@ auto type_to_string(OrderType a_type) -> std::string_view
     return a_type == OrderType::Limit ? "limit" : "market";
 }
 
-/// Structured mapping of OMS/connector error codes to HTTP responses.
-auto map_error(const Error& a_error, std::string_view a_client_order_id) -> crow::response
-{
-    if (a_error.code == "invalid_request") {
-        return error_response(400, "invalid_request", a_error.message, a_client_order_id);
-    }
-    if (a_error.code == "not_found" || a_error.code == "venue:51016" ||
-        a_error.code == "venue:-2013" || a_error.code == "venue:51603") {
-        return error_response(404, "not_found", a_error.message, a_client_order_id);
-    }
-    if (a_error.code == "order_terminal") {
-        return error_response(409, "order_terminal", a_error.message, a_client_order_id);
-    }
-    if (a_error.code.rfind("risk_", 0) == 0) {
-        // 400 (not 422): Crow v1.2.0 only emits status codes it knows and
-        // rewrites unknown ones to 500; the machine-readable risk_* code
-        // carries the semantics.
-        return error_response(400, a_error.code, a_error.message, a_client_order_id);
-    }
-    if (a_error.code == "venue_absent") {
-        return error_response(409, "venue_rejected", a_error.message, a_client_order_id);
-    }
-    if (a_error.code == "transport") {
-        return error_response(502, "venue_unavailable", "cannot reach the venue",
-                              a_client_order_id);
-    }
-    if (a_error.code.rfind("venue:", 0) == 0) {
-        return error_response(409, "venue_rejected", a_error.message, a_client_order_id);
-    }
-    if (a_error.code == "persistence") {
-        return error_response(500, "persistence", a_error.message, a_client_order_id);
-    }
-    return error_response(500, "internal", a_error.message, a_client_order_id);
-}
-
 auto record_json(const OrderRecord& a_record) -> nlohmann::json
 {
-    return {{"clientOrderId", a_record.client_order_id},
-            {"exchangeOrderId", a_record.exchange_order_id},
-            {"symbol", a_record.symbol},
-            {"venue", a_record.venue},
-            {"side", side_to_string(a_record.side)},
-            {"type", type_to_string(a_record.type)},
-            {"timeInForce", a_record.time_in_force},
-            {"state", to_string(a_record.state)},
-            {"price", a_record.price},
-            {"quantity", a_record.quantity},
-            {"filledQuantity", a_record.filled_quantity},
-            {"averageFillPrice", a_record.average_fill_price}};
-}
-
-/// Reject unknown fields: the client must not send exchange-specific
-/// parameters (spec: "Client must not send exchange-specific fields").
-auto unknown_fields(const nlohmann::json& a_body,
-                    std::initializer_list<std::string_view> a_allowed) -> std::string
-{
-    std::string unknown;
-    for (auto it = a_body.begin(); it != a_body.end(); ++it) {
-        const bool allowed =
-            std::find(a_allowed.begin(), a_allowed.end(), it.key()) != a_allowed.end();
-        if (!allowed) {
-            if (!unknown.empty()) {
-                unknown += ", ";
-            }
-            unknown += it.key();
-        }
-    }
-    return unknown;
-}
-
-auto string_field(const nlohmann::json& a_body, const char* a_name) -> std::string
-{
-    const auto it = a_body.find(a_name);
-    if (it != a_body.end() && it->is_string()) {
-        return it->get<std::string>();
-    }
-    return {};
-}
-
-auto optional_string_field(const nlohmann::json& a_body,
-                           const char* a_name) -> std::optional<std::string>
-{
-    const auto it = a_body.find(a_name);
-    if (it == a_body.end() || it->is_null()) {
-        return std::nullopt;
-    }
-    if (!it->is_string()) {
-        return std::nullopt;
-    }
-    return it->get<std::string>();
-}
-
-auto parse_json_body(const crow::request& a_request,
-                     crow::response& a_response) -> std::optional<nlohmann::json>
-{
-    const auto body = nlohmann::json::parse(a_request.body, nullptr, false);
-    if (body.is_discarded() || !body.is_object()) {
-        a_response =
-            error_response(400, "invalid_request", "request body must be a JSON object", "");
-        return std::nullopt;
+    nlohmann::json body = {{"clientOrderId", a_record.client_order_id},
+                           {"exchangeOrderId", a_record.exchange_order_id},
+                           {"symbol", a_record.symbol},
+                           {"venue", a_record.venue},
+                           {"side", side_to_string(a_record.side)},
+                           {"type", type_to_string(a_record.type)},
+                           {"timeInForce", a_record.time_in_force},
+                           {"state", to_string(a_record.state)},
+                           {"price", a_record.price},
+                           {"quantity", a_record.quantity},
+                           {"filledQuantity", a_record.filled_quantity},
+                           {"averageFillPrice", a_record.average_fill_price}};
+    if (a_record.rejection.has_value()) {
+        // state "rejected": the recorded reason replayed to retries
+        // (risk_* code or venue rejection).
+        body["rejection"] = {{"code", a_record.rejection->code},
+                             {"reason", a_record.rejection->message}};
     }
     return body;
 }
+
 } // namespace
 
 void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)

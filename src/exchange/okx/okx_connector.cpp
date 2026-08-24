@@ -185,6 +185,20 @@ auto OkxConnector::get_price(const std::string& a_instrument_id) -> Result<std::
         [](const Error& a_error) { return a_error.code == "transport"; });
 }
 
+auto OkxConnector::adjust_demo_balance(const OkxDemoBalanceRequest& a_request)
+    -> Result<nlohmann::json>
+{
+    // OKX exposes this endpoint on demo accounts only; fail fast with a
+    // clear error instead of surfacing an opaque venue rejection (or,
+    // worse, firing a signed request at a live account).
+    if (!config_.demo_trading) {
+        return Error{"invalid_request", "demo balance adjustment requires okx demoTrading"};
+    }
+    // Non-idempotent: a single attempt, deliberately outside the shared
+    // retry policy — re-sending an increase/reduce could double-apply.
+    return client_.adjust_demo_balance(a_request);
+}
+
 void OkxConnector::set_execution_report_handler(
     std::function<void(const ExecutionReport&)> a_handler)
 {

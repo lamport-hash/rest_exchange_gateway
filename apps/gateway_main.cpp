@@ -7,7 +7,9 @@
 #include "exchange/okx/okx_connector.hpp"
 #include "exchange/okx/okx_rest_client.hpp"
 #include "gateway/exchange_connector.hpp"
+#include "rest/okx_demo_routes.hpp"
 #include "rest/order_routes.hpp"
+#include "rest/risk_routes.hpp"
 
 #include <crow_all.h>
 #include <nlohmann/json.hpp>
@@ -169,6 +171,11 @@ auto main(int a_argc, char* a_argv[]) -> int
 
     crow::SimpleApp app;
     gateway::rest::register_order_routes(app, oms);
+    gateway::rest::register_risk_routes(app, oms);
+    if (okx_connector.has_value()) {
+        // OKX-only demo-trading surface; absent when OKX is not configured.
+        gateway::rest::register_okx_demo_routes(app, okx_connector.value());
+    }
 
     const auto start_venue = [](gateway::ExchangeConnector& a_connector) { a_connector.start(); };
     if (okx_connector.has_value()) {

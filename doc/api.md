@@ -14,6 +14,7 @@ Source of truth for behavior: `src/rest/order_routes.cpp`.
 | DELETE | `/orders/{clientOrderId}` | cancel (idempotent) |
 | PUT | `/orders/{clientOrderId}` | amend (price and/or quantity) |
 | GET | `/price/{symbol}` | last-traded price (`?venue=`, default venue) |
+| GET | `/risk` | active pre-trade risk limits (read-only) |
 | GET | `/health` | liveness + registry stats |
 
 ## Error envelope
@@ -86,6 +87,14 @@ no venue round-trip. **200**:
 ```
 
 `filledQuantity`/`averageFillPrice` are empty until the first fill reports.
+Orders in state `rejected` (listing and status view) additionally carry the
+recorded reason that is replayed to idempotent retries:
+
+```json
+{"…": "…", "state": "rejected",
+ "rejection": {"code": "risk_max_qty", "reason": "quantity 0.05 exceeds maxQty 0.01 for BTC-USDT"}}
+```
+
 Errors: 404 `not_found`.
 
 ## DELETE /orders/{clientOrderId} — cancel
@@ -129,6 +138,23 @@ default venue when absent. **200**:
 Errors: 400 `invalid_request` (unknown venue); 409 `venue_rejected`
 (unknown instrument — reason carries the venue code, e.g. `venue:51001`);
 502 `venue_unavailable`.
+
+## GET /risk — active pre-trade limits
+
+Read-only view of the pre-trade risk limits, fixed by the config file at
+startup (no runtime mutation). Mirrors the config `risk` section: an
+optional `default` block plus `instruments` entries — an entry replaces
+the defaults wholesale. Every field is a decimal string; an empty string
+disables that check for the scope; `"default": null` means no defaults
+are configured (unlimited for instruments without an entry). **200**:
+
+```json
+{"default": {"maxQty": "10", "maxNotional": "1000000", "maxPosition": "10"},
+ "instruments": {"BTC-USDT": {"maxQty": "5", "maxNotional": "", "maxPosition": "2"}}}
+```
+
+Known limitation: market orders skip `maxNotional` (no pre-trade price
+feed; documented in `src/core/risk.hpp`).
 
 ## GET /health
 

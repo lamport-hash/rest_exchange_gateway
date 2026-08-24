@@ -181,6 +181,12 @@ auto OrderManagementSystem::stats() const -> OmsStats
     return stats;
 }
 
+auto OrderManagementSystem::risk_config() const -> RiskConfig
+{
+    const std::lock_guard lock(mutex_);
+    return risk_;
+}
+
 void OrderManagementSystem::append_event(const nlohmann::json& a_event)
 {
     if (log_ == nullptr) {
