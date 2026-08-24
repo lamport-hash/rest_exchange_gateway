@@ -41,8 +41,11 @@ deliverables — those are met (see the compliance matrix there).
       documented limitation)
 - [ ] Numeric (not string) amend-landing comparison on OKX to avoid
       redundant re-sends (`okx_resilient.hpp:196`)
-- [ ] In-flight duplicate place: return 202 or wait for the ack instead of
+- [x] In-flight duplicate place: return 202 or wait for the ack instead of
       the optimistic `201 live` with empty exchangeOrderId (`oms.cpp:287`)
+      — DONE 2026-08-24: `OrderState::Pending` (gateway-local unacked
+      stage, `place_submitted` persisted before the venue call, 202
+      replays, `order_pending` 409 on cancel/amend, reconcile resolves)
 - [ ] Consistent persistence-failure code (`persistence` on both paths;
       today the risk-reject path can surface `io` → 500 `internal`)
 - [ ] `EventLog`: fail fast in the ctor if the file can't be opened;

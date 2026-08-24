@@ -243,7 +243,13 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                     {"venue", outcome.value().record.venue},
                     {"state", to_string(outcome.value().record.state)},
                     {"replayed", outcome.value().replayed}};
-                return json_response(201, response);
+                // Still unacked (a duplicate of an in-flight place, or a
+                // replay of a transport-unresolved one): 202 Accepted —
+                // the venue has not acknowledged the order, there is no
+                // exchangeOrderId yet. Once acked, replays return 201
+                // with the recorded record.
+                const int status = outcome.value().record.state == OrderState::Pending ? 202 : 201;
+                return json_response(status, response);
             } catch (...) {
                 return internal_error_response();
             }

@@ -64,9 +64,11 @@ POST /orders
 - Symbols stay `BTC-USDT` at the REST boundary; the Binance adapter
   translates to `BTCUSDT` on the wire and back on every response
   (`SymbolTranslator`, memoized with a quote-suffix fallback).
-- Normalized states: `live`, `partially_filled`, `filled`, `canceled`,
-  `rejected` — venue spellings map through explicit per-adapter tables
-  (Binance `EXPIRED`/`EXPIRED_IN_MATCH`/`PENDING_CANCEL` → canceled, etc.).
+- Normalized states: `pending`, `live`, `partially_filled`, `filled`,
+  `canceled`, `rejected` — venue spellings map through explicit per-adapter
+  tables (Binance `EXPIRED`/`EXPIRED_IN_MATCH`/`PENDING_CANCEL` → canceled,
+  etc.). `pending` is gateway-local (place sent, venue has not acked); venue
+  reports never carry it.
 - Full REST surface: `POST /orders`, `GET /orders` (registry listing),
   `GET /orders/{id}`, `DELETE /orders/{id}`
   (idempotent), `PUT /orders/{id}` (amend), `GET /price/{symbol}`
@@ -98,9 +100,14 @@ Three layers, each with one job:
 
 1. **Client idempotency (OMS).** A known `clientOrderId` replays its recorded
    outcome verbatim — identical ack or identical rejection — with no venue
-   call. Risk-rejected and venue-rejected places are recorded as terminal
-   `rejected` and replay deterministically. Only transport-unresolved places
-   record nothing and let the client retry safely (layer 3).
+   call. A place that passed risk is persisted (`place_submitted`) and
+   recorded `pending` **before** the venue call; unacked duplicates and
+   transport-unresolved retries replay the pending record (202), and risk- or
+   venue-rejected places replay their deterministic `rejected`. Pending
+   entries are resolved by the venue ack, a racing execution report, or
+   startup reconciliation (found → snapshot forward; conclusively absent →
+   `rejected`; unreachable → kept pending) — and count toward projected
+   position like working orders.
 2. **Report arbitration (state machine).** Duplicate, out-of-order and
    REST-vs-WS racing observations all funnel through one explicit
    transition table; illegal transitions are discarded and filled quantity

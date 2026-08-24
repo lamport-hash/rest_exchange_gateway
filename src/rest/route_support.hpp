@@ -125,6 +125,9 @@ inline auto map_error(const Error& a_error, std::string_view a_client_order_id) 
     if (a_error.code == "order_terminal") {
         return error_response(409, "order_terminal", a_error.message, a_client_order_id);
     }
+    if (a_error.code == "order_pending") {
+        return error_response(409, "order_pending", a_error.message, a_client_order_id);
+    }
     if (a_error.code.rfind("risk_", 0) == 0) {
         // 400 (not 422): Crow v1.2.0 only emits status codes it knows and
         // rewrites unknown ones to 500; the machine-readable risk_* code

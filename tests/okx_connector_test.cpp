@@ -272,6 +272,7 @@ TEST_CASE("map_okx_state covers documented states and rejects unknowns")
 
 TEST_CASE("to_string renders every OrderState")
 {
+    CHECK(to_string(OrderState::Pending) == "pending");
     CHECK(to_string(OrderState::Live) == "live");
     CHECK(to_string(OrderState::PartiallyFilled) == "partially_filled");
     CHECK(to_string(OrderState::Filled) == "filled");

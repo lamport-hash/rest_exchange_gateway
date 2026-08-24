@@ -26,8 +26,15 @@ enum class OrderType
 
 /// Normalized order lifecycle state. Illegal transitions are a concern of
 /// the order state machine (later phase); connectors only report snapshots.
+///
+/// Pending is gateway-local: it marks a place the gateway has staged and
+/// sent but the venue has not acknowledged yet. Venue execution reports
+/// and snapshots NEVER carry Pending; only the OMS creates it (at place
+/// staging) and only venue observations (or restart reconciliation)
+/// resolve it.
 enum class OrderState
 {
+    Pending,
     Live,
     PartiallyFilled,
     Filled,
@@ -185,6 +192,8 @@ class ExchangeConnector
 [[nodiscard]] inline auto to_string(OrderState a_state) -> std::string_view
 {
     switch (a_state) {
+    case OrderState::Pending:
+        return "pending";
     case OrderState::Live:
         return "live";
     case OrderState::PartiallyFilled:

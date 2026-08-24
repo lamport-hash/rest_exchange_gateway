@@ -18,9 +18,11 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -148,6 +150,9 @@ class GatewayFixture
         bool with_persistence = false;
         bool okx_demo_trading = true;
         gateway::RiskConfig risk{};
+        /// Crow worker threads; tests exercising concurrent requests
+        /// against a blocked venue call need at least 2.
+        int concurrency = 1;
     };
     using PreStartHook =
         std::function<void(crow::SimpleApp&, OkxConnector&, OkxMockServer&, OkxMockWsServer&)>;
@@ -195,8 +200,11 @@ class GatewayFixture
         (void)reconcile;
 
         const auto port = gateway::testing::pick_free_port();
-        server_future_ =
-            app_.port(port).concurrency(1).loglevel(crow::LogLevel::Warning).run_async();
+        port_ = static_cast<int>(port);
+        server_future_ = app_.port(port)
+                             .concurrency(a_options.concurrency)
+                             .loglevel(crow::LogLevel::Warning)
+                             .run_async();
         app_.wait_for_server_start();
         client_ = std::make_unique<httplib::Client>("127.0.0.1", static_cast<int>(port));
     }
@@ -215,6 +223,8 @@ class GatewayFixture
     [[nodiscard]] auto mock() -> OkxMockServer& { return *server_; }
     [[nodiscard]] auto ws() -> OkxMockWsServer& { return *ws_server_; }
     [[nodiscard]] auto binance() -> FakeVenueConnector& { return fake_binance_; }
+    [[nodiscard]] auto oms() -> gateway::OrderManagementSystem& { return *oms_; }
+    [[nodiscard]] auto port() const -> int { return port_; }
     [[nodiscard]] auto log_path() const -> const std::filesystem::path& { return log_path_; }
 
     /// Push an orders-channel update for a client order id and its state.
@@ -271,6 +281,7 @@ class GatewayFixture
     crow::SimpleApp app_;
     std::future<void> server_future_;
     std::unique_ptr<httplib::Client> client_;
+    int port_ = 0;
 };
 
 auto error_body(const httplib::Result& a_result) -> nlohmann::json
@@ -505,6 +516,125 @@ TEST_CASE("strict idempotency: retrying a known clientOrderId replays the outcom
     REQUIRE(third->status == 201);
     CHECK(nlohmann::json::parse(third->body)["state"] == "canceled");
     CHECK(nlohmann::json::parse(third->body)["replayed"] == true);
+}
+
+TEST_CASE("unacked places surface as pending: 202 replays, 409 order_pending")
+{
+    GatewayFixture fixture;
+    fixture.binance().place_impl = [](const OrderRequest&) -> Result<OrderPlacement> {
+        return Error{"transport", "venue unreachable"};
+    };
+    constexpr const char* body =
+        R"({"clientOrderId":"gw0001","venue":"binance","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})";
+
+    // the first attempt fails unresolved (502), but the intent is recorded
+    const auto first = fixture.client().Post("/orders", body, "application/json");
+    REQUIRE(first->status == 502);
+    CHECK(error_body(first)["error"]["code"] == "venue_unavailable");
+
+    // GET returns the working view of "we tried this id"
+    const auto get = fixture.client().Get("/orders/gw0001");
+    REQUIRE(get->status == 200);
+    const auto snapshot = nlohmann::json::parse(get->body);
+    CHECK(snapshot["state"] == "pending");
+    CHECK(snapshot["exchangeOrderId"] == "");
+
+    // a retry replays 202 pending — never a second venue send, never a
+    // fake 201 live
+    const auto retry = fixture.client().Post("/orders", body, "application/json");
+    REQUIRE(retry->status == 202);
+    const auto replay_body = nlohmann::json::parse(retry->body);
+    CHECK(replay_body["state"] == "pending");
+    CHECK(replay_body["exchangeOrderId"] == "");
+    CHECK(replay_body["replayed"] == true);
+    REQUIRE(fixture.binance().placed.size() == 1);
+
+    // cancel/amend of an unacked order are 409 order_pending (the venue
+    // has not accepted it — no venue call is attempted)
+    const auto cancel = fixture.client().Delete("/orders/gw0001");
+    REQUIRE(cancel->status == 409);
+    CHECK(error_body(cancel)["error"]["code"] == "order_pending");
+    const auto amend =
+        fixture.client().Put("/orders/gw0001", R"({"price":"49000"})", "application/json");
+    REQUIRE(amend->status == 409);
+    CHECK(error_body(amend)["error"]["code"] == "order_pending");
+    CHECK(fixture.binance().cancels.empty());
+    CHECK(fixture.binance().amends.empty());
+
+    // reconcile proves the venue never saw it: deterministic rejection
+    // replayed to further retries
+    const auto reconcile = fixture.oms().reconcile();
+    CHECK(reconcile.absent_rejected == 1);
+    const auto rejected = fixture.client().Get("/orders/gw0001");
+    REQUIRE(rejected->status == 200);
+    CHECK(nlohmann::json::parse(rejected->body)["state"] == "rejected");
+    const auto after = fixture.client().Post("/orders", body, "application/json");
+    REQUIRE(after->status == 409);
+    CHECK(error_body(after)["error"]["code"] == "venue_rejected");
+}
+
+TEST_CASE("a duplicate POST while the venue call is in flight gets 202 pending")
+{
+    // concurrency(3) = 2 Crow worker threads: the first POST blocks one
+    // inside the venue call, the duplicate needs the other (all
+    // connections are served by worker io_services; the acceptor thread
+    // never runs handlers).
+    GatewayFixture fixture{GatewayFixture::Options{.concurrency = 3}};
+    std::mutex mutex;
+    std::condition_variable cv;
+    int venue_entries = 0;
+    bool release = false;
+    fixture.binance().place_impl = [&](const OrderRequest& a_request) -> Result<OrderPlacement> {
+        {
+            const std::lock_guard lock(mutex);
+            ++venue_entries;
+            cv.notify_all();
+        }
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return release; }); // hold the venue call open
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "fake-" + a_request.client_order_id};
+    };
+    constexpr const char* body =
+        R"({"clientOrderId":"gw0001","venue":"binance","symbol":"BTC-USDT","side":"buy","type":"limit","price":"50000","quantity":"0.001"})";
+
+    // separate clients: cpp-httplib Client is not safe for concurrent use
+    int first_status = 0;
+    std::thread first([&] {
+        httplib::Client caller{"127.0.0.1", fixture.port()};
+        const auto res = caller.Post("/orders", body, "application/json");
+        first_status = res->status;
+    });
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return venue_entries == 1; }); // venue call open
+    }
+
+    // the concurrent duplicate replays the pending record: 202, never an
+    // optimistic 201 live with an empty exchangeOrderId
+    const auto duplicate = fixture.client().Post("/orders", body, "application/json");
+    REQUIRE(duplicate->status == 202);
+    const auto duplicate_body = nlohmann::json::parse(duplicate->body);
+    CHECK(duplicate_body["state"] == "pending");
+    CHECK(duplicate_body["exchangeOrderId"] == "");
+    CHECK(duplicate_body["replayed"] == true);
+
+    {
+        const std::lock_guard lock(mutex);
+        release = true;
+        cv.notify_all();
+    }
+    first.join();
+    CHECK(first_status == 201);
+    REQUIRE(fixture.binance().placed.size() == 1); // exactly one venue place
+
+    // once acked, the same POST replays the recorded 201 record as today
+    const auto replayed = fixture.client().Post("/orders", body, "application/json");
+    REQUIRE(replayed->status == 201);
+    const auto replay_body = nlohmann::json::parse(replayed->body);
+    CHECK(replay_body["state"] == "live");
+    CHECK(replay_body["exchangeOrderId"] == "fake-gw0001");
+    CHECK(replay_body["replayed"] == true);
 }
 
 TEST_CASE("validation errors use the structured error schema")

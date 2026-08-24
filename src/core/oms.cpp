@@ -76,6 +76,22 @@ auto event_string(const nlohmann::json& a_event, const char* a_name) -> std::opt
     return std::nullopt;
 }
 
+/// The pre-send intent record: persisted BEFORE the venue call so a
+/// crash between send and ack still leaves a Pending entry that startup
+/// replay restores and reconciliation resolves.
+auto place_submitted_event(const OrderRecord& a_record) -> nlohmann::json
+{
+    return {{"type", "place_submitted"},
+            {"clientOrderId", a_record.client_order_id},
+            {"symbol", a_record.symbol},
+            {"venue", a_record.venue},
+            {"side", side_to_string(a_record.side)},
+            {"orderType", type_to_string(a_record.type)},
+            {"price", a_record.price},
+            {"quantity", a_record.quantity},
+            {"timeInForce", a_record.time_in_force}};
+}
+
 auto place_accepted_event(const OrderRecord& a_record) -> nlohmann::json
 {
     return {{"type", "place_accepted"},
@@ -126,7 +142,8 @@ auto state_event(const OrderRecord& a_record) -> nlohmann::json
             {"clientOrderId", a_record.client_order_id},
             {"state", state_to_string(a_record.state)},
             {"filledQuantity", a_record.filled_quantity},
-            {"averageFillPrice", a_record.average_fill_price}};
+            {"averageFillPrice", a_record.average_fill_price},
+            {"exchangeOrderId", a_record.exchange_order_id}};
 }
 
 } // namespace
@@ -206,9 +223,7 @@ auto OrderManagementSystem::append_or_error(const nlohmann::json& a_event) -> st
 }
 
 auto OrderManagementSystem::projected_position(const std::string& a_symbol,
-                                               const OrderRecord* a_replace,
-                                               const std::string& a_exclude_id,
-                                               Side a_candidate_side,
+                                               const OrderRecord* a_replace, Side a_candidate_side,
                                                const std::string& a_candidate_qty) -> std::string
 {
     Decimal projected{};
@@ -234,7 +249,10 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
         if (filled.is_ok() && !is_zero(filled.value())) {
             add_in(signed_amount(record.side, filled.value()));
         }
-        // outstanding quantity of working orders may still execute
+        // outstanding quantity of working orders may still execute.
+        // Pending entries are non-terminal records and count in full: a
+        // place whose venue call is open (or was transport-unresolved) is
+        // already exposure — the venue may accept it at any moment.
         if (is_terminal(record.state) ||
             (a_replace != nullptr && id == a_replace->client_order_id)) {
             continue;
@@ -242,22 +260,6 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
         const auto quantity = parse_decimal(record.quantity);
         if (quantity.is_ok()) {
             add_in(signed_amount(record.side, sub_clamped_zero(quantity.value(), filled.value())));
-        }
-    }
-
-    // other in-flight place candidates are not in the registry yet but
-    // may land as working orders; count them at full quantity
-    for (const auto& [id, flight] : in_flight_) {
-        if (id == a_exclude_id || (a_replace != nullptr && id == a_replace->client_order_id)) {
-            continue;
-        }
-        const OrderRecord& candidate = flight.candidate;
-        if (candidate.symbol != a_symbol) {
-            continue;
-        }
-        const auto quantity = parse_decimal(candidate.quantity);
-        if (quantity.is_ok()) {
-            add_in(signed_amount(candidate.side, quantity.value()));
         }
     }
 
@@ -281,20 +283,17 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
     std::string venue{a_venue.empty() ? default_venue_ : std::string{a_venue}};
 
     ExchangeConnector* connector = nullptr;
-    { // ---- critical section 1: dedup, risk, stage the candidate ----
+    { // ---- critical section 1: dedup, risk, stage the pending record ----
         const std::lock_guard lock(mutex_);
 
         if (const auto existing = lookup(a_request.client_order_id); existing != orders_.end()) {
             if (existing->second.rejection.has_value()) {
                 return existing->second.rejection.value();
             }
+            // Replay the recorded outcome — including a still-Pending
+            // entry (its venue call is in flight, or a previous attempt
+            // was transport-unresolved): a duplicate must never re-send.
             return PlaceOutcome{.record = existing->second, .replayed = true};
-        }
-        if (const auto flying = in_flight_.find(a_request.client_order_id);
-            flying != in_flight_.end()) {
-            // a concurrent request owns the venue I/O for this id: replay
-            // the staged candidate rather than double-sending to the venue
-            return PlaceOutcome{.record = flying->second.candidate, .replayed = true};
         }
 
         connector = connector_for(venue);
@@ -315,7 +314,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
                                                    : a_request.time_in_force,
                               .price = a_request.price,
                               .quantity = a_request.quantity,
-                              .state = OrderState::Live,
+                              .state = OrderState::Pending,
                               .filled_quantity = "0",
                               .average_fill_price = "",
                               .exchange_order_ids = {},
@@ -328,7 +327,6 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
                                        .quantity = a_request.quantity,
                                        .projected_position =
                                            projected_position(a_request.instrument_id, nullptr,
-                                                              a_request.client_order_id,
                                                               a_request.side, a_request.quantity)};
             if (const auto rejection = check_risk(limits, a_request.instrument_id, risk_order)) {
                 candidate.state = OrderState::Rejected;
@@ -343,9 +341,18 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
             }
         }
 
-        in_flight_.emplace(
-            a_request.client_order_id,
-            InFlightPlace{.candidate = std::move(candidate), .buffered_reports = {}});
+        // ---- born Pending: persist the intent BEFORE the venue call ----
+        if (const auto persist_error = append_or_error(place_submitted_event(candidate));
+            persist_error.has_value()) {
+            // Nothing was sent to the venue: abort without recording.
+            // Sending after a lost place_submitted would create an order
+            // no restart can attribute to this clientOrderId.
+            ++stats_.log_write_failures;
+            return Error{"persistence",
+                         persist_error->message + " (order was not sent to the venue)"};
+        }
+        orders_[candidate.client_order_id] = std::move(candidate);
+        raced_reports_.try_emplace(a_request.client_order_id);
     }
 
     // ---- venue routing (NO lock: a venue feed thread applying execution
@@ -353,51 +360,63 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
     // same connection carries this very response) ----
     const auto placement = connector->place_order(a_request);
 
-    { // ---- critical section 2: record the outcome, drain raced reports ----
+    { // ---- critical section 2: apply the outcome, drain raced reports ----
         const std::lock_guard lock(mutex_);
-        const auto flying = in_flight_.find(a_request.client_order_id);
-        if (flying == in_flight_.end()) {
-            return Error{"internal", "in-flight place vanished for " + a_request.client_order_id};
+        std::vector<ExecutionReport> raced;
+        if (const auto flying = raced_reports_.find(a_request.client_order_id);
+            flying != raced_reports_.end()) {
+            raced = std::move(flying->second);
+            raced_reports_.erase(flying);
         }
-        OrderRecord candidate = std::move(flying->second.candidate);
-        std::vector<ExecutionReport> raced = std::move(flying->second.buffered_reports);
-        in_flight_.erase(flying);
+        const auto it = lookup(a_request.client_order_id);
+        if (it == orders_.end()) {
+            return Error{"internal", "pending place vanished for " + a_request.client_order_id};
+        }
+        OrderRecord& record = it->second;
 
         if (!placement.is_ok()) {
             if (placement.error().code != "transport") {
                 // definitive venue rejection: terminal Rejected, replayed to
                 // idempotent retries
-                candidate.state = OrderState::Rejected;
-                candidate.rejection = placement.error();
-                const auto persist_error = append_or_error(rejected_event(candidate));
-                orders_[candidate.client_order_id] = candidate;
-                if (persist_error.has_value()) {
-                    ++stats_.log_write_failures;
+                if (apply_transition(record.state, OrderState::Rejected) ==
+                    TransitionResult::Applied) {
+                    record.rejection = placement.error();
+                    const auto persist_error = append_or_error(rejected_event(record));
+                    if (persist_error.has_value()) {
+                        ++stats_.log_write_failures;
+                    }
                 }
+                return placement.error();
             }
-            // transport/unresolved: nothing recorded (the venue-side engine
-            // already resolved as far as it could; the client may retry)
+            // transport/unresolved: the record stays Pending (the intent
+            // is persisted; reconcile or an execution report resolves
+            // it). Reports that raced the failure are real observations
+            // about the venue-side outcome: apply them.
+            for (const auto& entry : raced) {
+                apply_report(record, entry);
+            }
             return placement.error();
         }
 
-        note_exchange_id(candidate, placement.value().exchange_order_id);
-        const auto persist_error = append_or_error(place_accepted_event(candidate));
-        orders_[candidate.client_order_id] = candidate;
+        note_exchange_id(record, placement.value().exchange_order_id);
+        // The venue acked: Pending -> Live. The record cannot have
+        // advanced meanwhile (racing reports were buffered, reconcile
+        // skips ids with an open venue call); the state machine still
+        // guards the move.
+        (void)apply_transition(record.state, OrderState::Live);
+        const auto persist_error = append_or_error(place_accepted_event(record));
         if (persist_error.has_value()) {
             ++stats_.log_write_failures;
             return Error{"persistence", persist_error->message +
                                             " (order was accepted by the venue; retry replays it)"};
         }
-        // reports that raced the venue ack apply after the record (and its
-        // place_accepted event) exist, keeping the log replay-correct
-        for (const auto& a_report : raced) {
-            if (apply_observation(orders_[a_request.client_order_id], a_report.state,
-                                  a_report.filled_quantity, a_report.average_fill_price)) {
-                ++stats_.reports_applied;
-                append_event(state_event(orders_[a_request.client_order_id]));
-            }
+        // reports that raced the venue ack apply after the place_accepted
+        // event exists, keeping the log replay-correct; the first applied
+        // observation may jump Pending -> PartiallyFilled/Filled
+        for (const auto& entry : raced) {
+            apply_report(record, entry);
         }
-        return PlaceOutcome{.record = orders_[a_request.client_order_id], .replayed = false};
+        return PlaceOutcome{.record = record, .replayed = false};
     }
 }
 
@@ -413,6 +432,13 @@ auto OrderManagementSystem::cancel(std::string_view a_client_order_id) -> Result
             return Error{"not_found", "unknown clientOrderId " + std::string{a_client_order_id}};
         }
         const OrderRecord& record = it->second;
+        if (record.state == OrderState::Pending) {
+            // The venue has not accepted the order: there is nothing to
+            // cancel. Never a venue call.
+            return Error{"order_pending", "order " + record.client_order_id +
+                                              " is pending venue acknowledgement; "
+                                              "cancel after the venue acknowledges it"};
+        }
         if (record.state == OrderState::Canceled) {
             return record; // idempotent cancel
         }
@@ -468,6 +494,14 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
             return Error{"not_found", "unknown clientOrderId " + a_command.client_order_id};
         }
         const OrderRecord& record = it->second;
+        if (record.state == OrderState::Pending) {
+            // The venue has not accepted the order: amending an order the
+            // venue may never see (or is still resolving) is ambiguous.
+            // Never a venue call.
+            return Error{"order_pending", "order " + record.client_order_id +
+                                              " is pending venue acknowledgement; "
+                                              "amend after the venue acknowledges it"};
+        }
         if (is_terminal(record.state)) {
             return Error{"order_terminal", "order " + record.client_order_id + " is " +
                                                std::string{state_to_string(record.state)}};
@@ -482,12 +516,11 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
 
         const auto limits = risk_.limits_for(record.symbol);
         if (limits.has_value()) {
-            const RiskOrder risk_order{
-                .side = record.side,
-                .price = new_price,
-                .quantity = new_quantity,
-                .projected_position = projected_position(
-                    record.symbol, &record, record.client_order_id, record.side, new_quantity)};
+            const RiskOrder risk_order{.side = record.side,
+                                       .price = new_price,
+                                       .quantity = new_quantity,
+                                       .projected_position = projected_position(
+                                           record.symbol, &record, record.side, new_quantity)};
             if (const auto rejection = check_risk(limits, record.symbol, risk_order)) {
                 return *rejection;
             }
@@ -630,19 +663,37 @@ void OrderManagementSystem::note_exchange_id(OrderRecord& a_record, const std::s
     a_record.exchange_order_ids.push_back(a_id);
 }
 
+void OrderManagementSystem::apply_report(OrderRecord& a_record, const ExecutionReport& a_report,
+                                         bool a_apply_lifecycle)
+{
+    // The first observation resolving a Pending record proves the venue
+    // saw the order: learn its exchangeOrderId (backfill only — a known
+    // id reflects the amend lifecycle and is never overwritten here).
+    if (a_record.exchange_order_id.empty()) {
+        note_exchange_id(a_record, a_report.exchange_order_id);
+    }
+    if (apply_observation(a_record, a_report.state, a_report.filled_quantity,
+                          a_report.average_fill_price, "", "", a_apply_lifecycle)) {
+        ++stats_.reports_applied;
+        append_event(state_event(a_record));
+    } else {
+        ++stats_.reports_stale;
+    }
+}
+
 void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
 {
     const std::lock_guard lock(mutex_);
+    // A place whose venue ack has not landed yet: buffer the report so it
+    // applies (and persists) right after the place outcome, in
+    // replay-correct order (place_submitted -> place_accepted -> state).
+    if (const auto flying = raced_reports_.find(a_report.client_order_id);
+        flying != raced_reports_.end()) {
+        flying->second.push_back(a_report);
+        return;
+    }
     const auto it = lookup(a_report.client_order_id);
     if (it == orders_.end()) {
-        // a place whose venue ack has not landed yet: buffer the report on
-        // the in-flight entry so it applies (and persists) right after the
-        // record exists, in replay-correct order
-        if (const auto flying = in_flight_.find(a_report.client_order_id);
-            flying != in_flight_.end()) {
-            flying->second.buffered_reports.push_back(a_report);
-            return;
-        }
         ++stats_.reports_unknown;
         return;
     }
@@ -666,13 +717,7 @@ void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
             std::find(history.begin(), history.end(), a_report.exchange_order_id) == history.end();
     }
 
-    if (apply_observation(record, a_report.state, a_report.filled_quantity,
-                          a_report.average_fill_price, "", "", apply_lifecycle)) {
-        ++stats_.reports_applied;
-        append_event(state_event(record));
-    } else {
-        ++stats_.reports_stale;
-    }
+    apply_report(record, a_report, apply_lifecycle);
 }
 
 void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot,
@@ -721,27 +766,44 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
         const std::lock_guard lock(mutex_);
         for (const auto& snapshot : pending.value()) {
             if (snapshot.client_order_id.empty() ||
-                in_flight_.find(snapshot.client_order_id) != in_flight_.end()) {
-                // an in-flight place owns this id: its own ack/report path
-                // records the outcome (adopting here would race it)
+                raced_reports_.find(snapshot.client_order_id) != raced_reports_.end()) {
+                // a place whose venue call is still open owns this id: its
+                // own ack/report path records the outcome (adopting or
+                // updating here would race it)
                 continue;
             }
             const auto it = lookup(snapshot.client_order_id);
             if (it == orders_.end()) {
                 record_from_snapshot(snapshot, venue, true);
                 ++report.adopted;
-            } else if (apply_observation(it->second, snapshot.state, snapshot.filled_quantity,
-                                         snapshot.average_fill_price, snapshot.price,
-                                         snapshot.quantity)) {
-                ++report.updated;
-                append_event(state_event(it->second));
+            } else {
+                // a snapshot resolving a Pending entry carries the
+                // venue's id: backfill it once (known ids are never
+                // overwritten — they follow the amend lifecycle)
+                bool changed = false;
+                if (it->second.exchange_order_id.empty() && !snapshot.exchange_order_id.empty()) {
+                    note_exchange_id(it->second, snapshot.exchange_order_id);
+                    changed = true;
+                }
+                if (apply_observation(it->second, snapshot.state, snapshot.filled_quantity,
+                                      snapshot.average_fill_price, snapshot.price,
+                                      snapshot.quantity)) {
+                    changed = true;
+                }
+                if (changed) {
+                    ++report.updated;
+                    append_event(state_event(it->second));
+                }
             }
         }
     }
 
     // ---- Phase B: resolve every non-terminal registry entry ----
     // Snapshot the worklist under the lock; per-order venue lookups and
-    // their application each take the lock separately.
+    // their application each take the lock separately. Ids whose venue
+    // call is still open are skipped: their own place path records the
+    // outcome (a snapshot applied here could precede the place_accepted
+    // event and break replay ordering).
     struct WorkItem
     {
         std::string id;
@@ -752,7 +814,7 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
     {
         const std::lock_guard lock(mutex_);
         for (const auto& [id, record] : orders_) {
-            if (!is_terminal(record.state)) {
+            if (!is_terminal(record.state) && raced_reports_.find(id) == raced_reports_.end()) {
                 const std::string& venue = record.venue.empty() ? default_venue_ : record.venue;
                 open.push_back(WorkItem{id, venue, OrderQuery{id, record.symbol}});
             }
@@ -772,10 +834,18 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
         }
         OrderRecord& record = it->second;
         if (snapshot.is_ok() && snapshot.value().has_value()) {
+            bool changed = false;
+            if (record.exchange_order_id.empty() && !snapshot.value()->exchange_order_id.empty()) {
+                note_exchange_id(record, snapshot.value()->exchange_order_id);
+                changed = true;
+            }
             if (apply_observation(record, snapshot.value()->state,
                                   snapshot.value()->filled_quantity,
                                   snapshot.value()->average_fill_price, snapshot.value()->price,
                                   snapshot.value()->quantity)) {
+                changed = true;
+            }
+            if (changed) {
                 append_event(state_event(record));
                 if (is_terminal(record.state)) {
                     ++report.terminal_resolved;
@@ -827,10 +897,14 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         return; // replay is schema-validated defensively: skip junk
     }
 
-    if (*type == "place_accepted" || *type == "adopted") {
+    if (*type == "place_submitted" || *type == "place_accepted" || *type == "adopted") {
         const auto symbol = event_string(a_event, "symbol").value_or("");
         const auto venue = event_string(a_event, "venue").value_or(default_venue_);
-        const auto exchange_order_id = event_string(a_event, "exchangeOrderId").value_or("");
+        // place_submitted carries no exchangeOrderId (no ack yet); when a
+        // place_accepted follows in the log it overwrites this record.
+        const auto exchange_order_id = *type == "place_submitted"
+                                           ? std::string{}
+                                           : event_string(a_event, "exchangeOrderId").value_or("");
         const auto side =
             parse_side(event_string(a_event, "side").value_or("buy")).value_or(Side::Buy);
         const auto order_type = parse_type(event_string(a_event, "orderType").value_or("limit"))
@@ -850,6 +924,13 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
                            .exchange_order_ids = {},
                            .adopted = *type == "adopted",
                            .rejection = std::nullopt};
+        if (*type == "place_submitted") {
+            // torn write / crash before the venue ack: the entry replays
+            // Pending and startup reconciliation resolves it (venue
+            // snapshot forward, conclusive absence -> Rejected,
+            // unreachable -> kept pending).
+            record.state = OrderState::Pending;
+        }
         if (!exchange_order_id.empty()) {
             record.exchange_order_ids = {exchange_order_id};
         }
@@ -910,6 +991,12 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         }
         apply_observation(it->second, *state, event_string(a_event, "filledQuantity").value_or(""),
                           event_string(a_event, "averageFillPrice").value_or(""));
+        // events written after a Pending entry was resolved by an
+        // observation carry the venue's id; backfill it once (older
+        // logs have no such field)
+        if (it->second.exchange_order_id.empty()) {
+            note_exchange_id(it->second, event_string(a_event, "exchangeOrderId").value_or(""));
+        }
         return;
     }
 }

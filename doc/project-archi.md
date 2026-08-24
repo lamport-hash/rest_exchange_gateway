@@ -64,7 +64,7 @@ flowchart TB
 
 - Exchange-specific code lives only inside its adapter subdirectory and is never referenced from the REST layer.
 - Common order schema: `clientOrderId`, `venue` (OKX | BINANCE), `symbol`, `side`, `type` (Market/Limit), `price`, `quantity`, `timeInForce`.
-- Normalized execution states: New/Live, Partially Filled, Filled, Canceled, Rejected. Mapping between client-level concepts and exchange-specific semantics must be explicit.
+- Normalized execution states: Pending (gateway-local: place sent, venue has not acked), New/Live, Partially Filled, Filled, Canceled, Rejected. Mapping between client-level concepts and exchange-specific semantics must be explicit; venue reports never carry Pending.
 
 ## Robustness Requirements
 

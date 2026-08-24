@@ -31,7 +31,11 @@ struct OrderRecord
     /// Current (post-amend) values as decimal strings.
     std::string price;
     std::string quantity;
-    OrderState state = OrderState::Live;
+    /// Lifecycle state. Pending = the place was staged and sent but the
+    /// venue has not acknowledged it (gateway-local; the exchangeOrderId
+    /// is unknown/empty). Resolved by the venue ack, an execution report
+    /// racing the ack, or restart reconciliation.
+    OrderState state = OrderState::Pending;
     /// Monotonic high-water mark of reported fills.
     std::string filled_quantity = "0";
     std::string average_fill_price;
@@ -100,7 +104,14 @@ struct OmsStats
 /// - venue routing: one connector per venue ("okx", "binance", ...); each
 ///   record remembers its venue and every follow-up routes through it
 /// - strict idempotency: once a clientOrderId is known, places with it
-///   replay the recorded outcome (identical ack or identical rejection)
+///   replay the recorded outcome (identical ack, pending record, or
+///   identical rejection)
+/// - the pending stage: a place that passed risk is PERSISTED
+///   (place_submitted) and recorded Pending BEFORE the venue call; the
+///   venue ack, a racing execution report or restart reconciliation then
+///   resolves it forward (Live/PartiallyFilled/Filled/Rejected). Pending
+///   orders cannot be canceled or amended (the venue has not accepted
+///   them) and count toward risk projections like working orders
 /// - execution-report arbitration through the order state machine:
 ///   duplicates, out-of-order and REST-vs-WS races never regress state
 ///   (filled quantity is a monotonic high-water mark); reports from every
@@ -110,18 +121,21 @@ struct OmsStats
 /// - append-only persistence of every applied event + startup replay
 /// - startup/reconnect reconciliation with every venue
 ///
-/// Concurrency: mutex_ guards the registry (and the in-flight staging
-/// map) only; venue (connector) calls are made WITHOUT holding it. A
+/// Concurrency: mutex_ guards the registry (and the raced-reports
+/// buffer) only; venue (connector) calls are made WITHOUT holding it. A
 /// venue feed thread applying execution reports therefore never waits
 /// behind venue I/O (on WS-API venues like Binance the same connection
 /// carries request responses, so a blocked feed thread would stall the
 /// client's own ack). Consequences, handled explicitly:
 /// - execution reports racing an in-flight place are buffered per
-///   clientOrderId and applied right after the place outcome lands
+///   clientOrderId (raced_reports_) and applied right after the place
+///   outcome lands, keeping the log replay-correct
+///   (place_submitted -> place_accepted -> state)
 /// - a concurrent duplicate place of an in-flight clientOrderId replays
-///   the staged candidate instead of sending a second venue request
-/// - pre-trade risk projects positions across the registry AND other
-///   in-flight candidates
+///   the Pending registry record instead of sending a second venue
+///   request
+/// - pre-trade risk projects positions across the registry (Pending
+///   entries included — they are working orders-to-be)
 /// Registry mutations re-validate under the lock (state machine guards
 /// illegal transitions); cancel/amend snapshot what they need before the
 /// venue call and re-apply to the (possibly progressed) record after.
@@ -147,25 +161,34 @@ class OrderManagementSystem
 
     /// Place a new order on a_venue (empty -> default venue). Paths:
     /// - known clientOrderId: replayed outcome (record + replayed=true),
-    ///   or the recorded rejection as an error
+    ///   or the recorded rejection as an error. A still-unacked entry
+    ///   (Pending — its venue call is in flight, or a previous attempt
+    ///   was transport-unresolved) replays the pending record instead of
+    ///   re-sending to the venue
     /// - unknown venue: "invalid_request"
     /// - risk rejection: recorded Rejected (code risk_*)
     /// - venue accepted: recorded Live
     /// - definitive venue rejection: recorded Rejected (code venue:*)
-    /// - transport/unresolved: nothing recorded (the venue-side engine
-    ///   already resolved as far as it could; the client may retry)
-    /// - persistence failure after venue acceptance: recorded anyway and
-    ///   reported as "persistence" (client retry replays the outcome)
+    /// - transport/unresolved: the record stays Pending (place_submitted
+    ///   was already persisted; reconcile or an execution report resolves
+    ///   it) and the transport error is returned
+    /// - persistence failure of the pre-send place_submitted event: the
+    ///   order is NOT sent ("persistence" error, nothing recorded); after
+    ///   venue acceptance a persistence failure is reported but the
+    ///   outcome is recorded anyway (client retry replays it)
     [[nodiscard]] auto place(const OrderRequest& a_request,
                              std::string_view a_venue = {}) -> Result<PlaceOutcome>;
 
     /// Cancel; idempotent (already-canceled returns the record).
-    /// Errors: "not_found", "order_terminal", venue/transport codes.
+    /// Errors: "not_found", "order_pending" (venue has not acked yet —
+    /// there is nothing to cancel; no venue call), "order_terminal",
+    /// venue/transport codes.
     [[nodiscard]] auto cancel(std::string_view a_client_order_id) -> Result<OrderRecord>;
 
     /// Amend price and/or quantity (risk checks re-run on the new values).
-    /// Errors: "not_found", "order_terminal", "protocol" (nothing to
-    /// change), venue/transport codes.
+    /// Errors: "not_found", "order_pending" (venue has not acked yet),
+    /// "order_terminal", "protocol" (nothing to change), venue/transport
+    /// codes.
     [[nodiscard]] auto amend(const AmendCommand& a_command) -> Result<OrderRecord>;
 
     /// Registry lookup (copy). Errors: "not_found". Serves the REST GET.
@@ -219,6 +242,14 @@ class OrderManagementSystem
                            std::string_view a_avg_price, std::string_view a_price = "",
                            std::string_view a_quantity = "", bool a_apply_lifecycle = true) -> bool;
 
+    /// Apply one execution report to a record (stats + persistence
+    /// included). The first observation resolving a Pending record
+    /// backfills the venue's exchangeOrderId (a known id is never
+    /// overwritten — superseded legs are arbitrated by the caller via
+    /// a_apply_lifecycle=false).
+    void apply_report(OrderRecord& a_record, const ExecutionReport& a_report,
+                      bool a_apply_lifecycle = true);
+
     /// Adopt/reject/... helpers shared by reconcile and replay.
     void record_from_snapshot(const OrderSnapshot& a_snapshot, const std::string& a_venue,
                               bool a_adopted);
@@ -228,12 +259,14 @@ class OrderManagementSystem
     /// Worst-case signed position for a_symbol if every working order
     /// (plus the candidate amount) fully filled. a_replace non-null: the
     /// candidate replaces that record's contribution (amend); null: the
-    /// candidate is a fresh order (place). a_exclude_id: the candidate's
-    /// own clientOrderId (never double-counted). Sums across venues: the
-    /// same instrument traded on two venues is one net position. In-flight
-    /// place candidates count at their full quantity.
+    /// candidate is a fresh order (place — it is not in the registry yet:
+    /// the dedup check in the same critical section guarantees it). Sums
+    /// across venues: the same instrument traded on two venues is one net
+    /// position. Pending entries are non-terminal registry records and
+    /// count at their full quantity (a place whose venue call is still
+    /// open is already exposure).
     auto projected_position(const std::string& a_symbol, const OrderRecord* a_replace,
-                            const std::string& a_exclude_id, Side a_candidate_side,
+                            Side a_candidate_side,
                             const std::string& a_candidate_qty) -> std::string;
 
     /// Append an event; counts failures (venue truth already applied).
@@ -256,19 +289,19 @@ class OrderManagementSystem
     EventLog* log_;
     RiskConfig risk_;
     mutable std::mutex mutex_;
+    /// The registry: every known clientOrderId. Pending entries are
+    /// places whose venue call has not resolved yet — pending lives HERE,
+    /// not in a side map.
     std::unordered_map<std::string, OrderRecord> orders_;
 
-    /// Places whose venue I/O is running (guarded by mutex_). Buffers
-    /// execution reports that race the venue ack so they apply right
-    /// after the record lands in the registry (log order stays
-    /// place_accepted -> state). Transport-unresolved places erase their
-    /// entry: nothing is recorded, the client retry reaches the venue.
-    struct InFlightPlace
-    {
-        OrderRecord candidate;
-        std::vector<ExecutionReport> buffered_reports;
-    };
-    std::unordered_map<std::string, InFlightPlace> in_flight_;
+    /// Execution reports that raced a place whose venue call is still
+    /// open (guarded by mutex_), keyed by clientOrderId. Purely a buffer:
+    /// it holds no order state. Reports drain (and persist) right after
+    /// the place outcome lands, keeping the log replay-correct
+    /// (place_submitted -> place_accepted -> state). The entry is erased
+    /// when the place resolves — later reports apply to the registry
+    /// record directly.
+    std::unordered_map<std::string, std::vector<ExecutionReport>> raced_reports_;
 
     OmsStats stats_;
 };

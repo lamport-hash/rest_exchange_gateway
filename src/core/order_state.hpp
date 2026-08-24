@@ -10,9 +10,15 @@ namespace gateway {
 /// Explicit legal-transition table of the normalized order lifecycle.
 ///
 /// Semantics:
-/// - An order is born Live (venue ack) or Rejected (pre-trade risk
-///   rejection, definitive venue rejection, or conclusively unknown to
-///   the venue after a restart).
+/// - An order is born Pending (place staged/sent, venue has not acked) or
+///   Rejected (pre-trade risk rejection). Pending is gateway-local: venue
+///   observations never carry it.
+/// - Pending resolves forward only: to Live once the venue acks
+///   (exchangeOrderId known), directly to PartiallyFilled/Filled when an
+///   execution report races the ack (skipping Live), or to Rejected on a
+///   definitive venue rejection / restart reconciliation proving the
+///   venue never saw the order. Pending -> Canceled is ILLEGAL (you
+///   cannot cancel what the venue has not accepted).
 /// - Live/PartiallyFilled move forward to PartiallyFilled/Filled/Canceled;
 ///   they may also be moved to Rejected only by reconciliation (the venue
 ///   no longer knows the order) — no venue execution report ever carries
@@ -26,7 +32,12 @@ namespace gateway {
 /// out-of-order / duplicate / REST-vs-WS race arbitration: late or
 /// duplicated observations against a terminal or further-advanced state
 /// simply do not apply.
-inline constexpr std::array<std::pair<OrderState, OrderState>, 9> kLegalTransitions{{
+inline constexpr std::array<std::pair<OrderState, OrderState>, 14> kLegalTransitions{{
+    {OrderState::Pending, OrderState::Pending},
+    {OrderState::Pending, OrderState::Live},
+    {OrderState::Pending, OrderState::PartiallyFilled},
+    {OrderState::Pending, OrderState::Filled},
+    {OrderState::Pending, OrderState::Rejected},
     {OrderState::Live, OrderState::Live},
     {OrderState::Live, OrderState::PartiallyFilled},
     {OrderState::Live, OrderState::Filled},

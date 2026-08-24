@@ -148,7 +148,7 @@ function renderOrders(data) {
 
 /* ------------------------------------------------------ state visualization -- */
 
-const STATES = ["live", "partially_filled", "filled", "canceled", "rejected"];
+const STATES = ["pending", "live", "partially_filled", "filled", "canceled", "rejected"];
 
 function renderStateChart() {
   const chart = $("#state-chart");

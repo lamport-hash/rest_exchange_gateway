@@ -107,6 +107,7 @@ tbody tr:last-child td { border-bottom: none; }
 #orders-table td { font-family: var(--mono); font-size: 12px; }
 
 .state { padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.state.pending           { background: #2b2410; color: #d5a44b; }
 .state.live             { background: #103524; color: #58d59a; }
 .state.partially_filled { background: #33290e; color: #e5b567; }
 .state.filled           { background: #0e2f4a; color: #6cb2ff; }
@@ -280,6 +281,7 @@ pre.json {
   overflow: hidden;
 }
 .chart-fill { height: 100%; min-width: 0; transition: width 0.4s; }
+.chart-fill.pending           { background: #b8922c; }
 .chart-fill.live             { background: #2ea86c; }
 .chart-fill.partially_filled { background: #d29a2c; }
 .chart-fill.filled           { background: #4c8dff; }

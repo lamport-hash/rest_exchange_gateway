@@ -18,6 +18,11 @@ namespace gateway {
 /// line followed by valid data is real corruption and fails the replay.
 ///
 /// Event schema (written and replayed by the OMS; "ts" is informational):
+///  - {"type":"place_submitted","clientOrderId","symbol","venue","side",
+///     "orderType","price","quantity","timeInForce"}
+///     — persisted BEFORE the venue call; a log ending here (no
+///     place_accepted/rejected follow-up) replays as a Pending entry that
+///     reconciliation resolves
 ///  - {"type":"place_accepted","clientOrderId","symbol","side","orderType",
 ///     "price","quantity","timeInForce","exchangeOrderId"}
 ///  - {"type":"adopted", <place_accepted fields>,"state","filledQuantity",

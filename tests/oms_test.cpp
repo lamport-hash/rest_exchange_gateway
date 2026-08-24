@@ -268,27 +268,92 @@ TEST_CASE("definitive venue rejections are recorded and replayed")
     CHECK(oms.query("gw1").value().state == OrderState::Rejected);
 }
 
-TEST_CASE("transport-unresolved places record nothing; retry reaches the venue")
+TEST_CASE("transport-unresolved places stay pending until reconciled")
 {
     FakeConnector connector;
-    int attempts = 0;
-    connector.place_impl = [&attempts](const OrderRequest&) -> Result<OrderPlacement> {
-        ++attempts;
-        if (attempts == 1) {
-            return Error{"transport", "unresolved"};
-        }
-        return OrderPlacement{.client_order_id = "gw1", .exchange_order_id = "ord-gw1"};
+    connector.place_impl = [](const OrderRequest&) -> Result<OrderPlacement> {
+        return Error{"transport", "unresolved"};
     };
-    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    const auto path = temp_log_path("transport_pending");
+    std::filesystem::remove(path);
+    EventLog log{path};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
 
     const auto failed = oms.place(buy_request());
     REQUIRE_FALSE(failed.is_ok());
     CHECK(failed.error().code == "transport");
-    CHECK(oms.stats().known_orders == 0);
 
+    // the intent is visible and queryable: "we tried this id"
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    CHECK(record.value().state == OrderState::Pending);
+    CHECK(record.value().exchange_order_id.empty());
+    CHECK(record.value().quantity == "1");
+
+    // retries replay the pending record; the venue is never re-sent
+    // (the adapter already resolved as far as it could)
     const auto retried = oms.place(buy_request());
     REQUIRE(retried.is_ok());
-    CHECK(retried.value().record.exchange_order_id == "ord-gw1");
+    CHECK(retried.value().replayed);
+    CHECK(retried.value().record.state == OrderState::Pending);
+    REQUIRE(connector.placed.size() == 1);
+
+    // cancel/amend of the unacked order are gateway-side rejections
+    const auto cancel = oms.cancel("gw1");
+    REQUIRE_FALSE(cancel.is_ok());
+    CHECK(cancel.error().code == "order_pending");
+    const auto amend =
+        oms.amend(AmendCommand{"gw1", std::optional<std::string>{"1"}, std::nullopt});
+    REQUIRE_FALSE(amend.is_ok());
+    CHECK(amend.error().code == "order_pending");
+    CHECK(connector.cancels.empty());
+    CHECK(connector.amends.empty());
+
+    // the pending intent survives a restart (place_submitted replay)
+    OrderManagementSystem restarted{{{"okx", &connector}}, &log, RiskConfig{}};
+    REQUIRE(restarted.load_from_log().is_ok());
+    const auto recovered = restarted.query("gw1");
+    REQUIRE(recovered.is_ok());
+    CHECK(recovered.value().state == OrderState::Pending);
+
+    // conclusive absence at reconciliation -> deterministic Rejected
+    const auto reconcile_report = oms.reconcile();
+    CHECK(reconcile_report.absent_rejected == 1);
+    const auto rejected = oms.query("gw1");
+    REQUIRE(rejected.is_ok());
+    CHECK(rejected.value().state == OrderState::Rejected);
+    REQUIRE(rejected.value().rejection.has_value());
+    CHECK(rejected.value().rejection->code == "venue_absent");
+
+    // ...and retries now replay the recorded rejection
+    const auto replayed = oms.place(buy_request());
+    REQUIRE_FALSE(replayed.is_ok());
+    CHECK(replayed.error().code == "venue_absent");
+    REQUIRE(connector.placed.size() == 1);
+}
+
+TEST_CASE("an execution report can resolve a transport-unresolved pending order")
+{
+    FakeConnector connector;
+    connector.place_impl = [](const OrderRequest&) -> Result<OrderPlacement> {
+        return Error{"transport", "unresolved"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    REQUIRE_FALSE(oms.place(buy_request()).is_ok());
+
+    // the venue feed later proves the order actually landed and filled:
+    // the first applied observation jumps Pending -> PartiallyFilled
+    oms.on_execution_report(report("gw1", OrderState::PartiallyFilled, "0.4", "49999.5"));
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    CHECK(record.value().state == OrderState::PartiallyFilled);
+    CHECK(record.value().filled_quantity == "0.4");
+
+    // resolved orders behave normally again (cancel is a venue call)
+    const auto canceled = oms.cancel("gw1");
+    REQUIRE(canceled.is_ok());
+    CHECK(canceled.value().state == OrderState::Canceled);
+    REQUIRE(connector.cancels.size() == 1);
 }
 
 TEST_CASE("execution reports racing an in-flight place are buffered and applied")
@@ -316,7 +381,42 @@ TEST_CASE("execution reports racing an in-flight place are buffered and applied"
     CHECK_FALSE(outcome.value().replayed);
 }
 
-TEST_CASE("a duplicate place while the venue call is in flight replays instead of re-sending")
+TEST_CASE("a place is born pending and visible before the venue ack")
+{
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.place_impl = [&oms_ptr](const OrderRequest& a_request) -> Result<OrderPlacement> {
+        // during the open venue call the registry already knows the
+        // intent — GET returns a working view of "we tried this id"
+        const auto mid_flight = oms_ptr->query(a_request.client_order_id);
+        REQUIRE(mid_flight.is_ok());
+        CHECK(mid_flight.value().state == OrderState::Pending);
+        CHECK(mid_flight.value().exchange_order_id.empty());
+
+        // a report racing the open venue call is buffered, not applied:
+        // place_accepted must precede state events in the log
+        oms_ptr->on_execution_report(
+            report(a_request.client_order_id, OrderState::PartiallyFilled, "0.4", "49999.5"));
+        const auto still_pending = oms_ptr->query(a_request.client_order_id);
+        REQUIRE(still_pending.is_ok());
+        CHECK(still_pending.value().state == OrderState::Pending);
+
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-" + a_request.client_order_id};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+
+    const auto outcome = oms.place(buy_request());
+    REQUIRE(outcome.is_ok());
+    CHECK_FALSE(outcome.value().replayed);
+    // ack + drained report: pending -> live -> partially_filled
+    CHECK(outcome.value().record.state == OrderState::PartiallyFilled);
+    CHECK(outcome.value().record.filled_quantity == "0.4");
+    CHECK(outcome.value().record.exchange_order_id == "ord-gw1");
+}
+
+TEST_CASE("a duplicate place while the venue call is in flight replays the pending record")
 {
     FakeConnector connector;
     std::mutex mutex;
@@ -339,7 +439,8 @@ TEST_CASE("a duplicate place while the venue call is in flight replays instead o
     bool first_ok = false;
     std::thread first([&] {
         const auto outcome = oms.place(buy_request());
-        first_ok = outcome.is_ok() && !outcome.value().replayed;
+        first_ok = outcome.is_ok() && !outcome.value().replayed &&
+                   outcome.value().record.state == OrderState::Live;
     });
     {
         std::unique_lock lock(mutex);
@@ -348,6 +449,9 @@ TEST_CASE("a duplicate place while the venue call is in flight replays instead o
     const auto duplicate = oms.place(buy_request()); // same id, venue call open
     REQUIRE(duplicate.is_ok());
     CHECK(duplicate.value().replayed);
+    // honest about the unacked state — never an optimistic 201 live
+    CHECK(duplicate.value().record.state == OrderState::Pending);
+    CHECK(duplicate.value().record.exchange_order_id.empty());
     {
         const std::lock_guard lock(mutex);
         release = true;
@@ -359,7 +463,68 @@ TEST_CASE("a duplicate place while the venue call is in flight replays instead o
 
     const auto settled = oms.query("gw1");
     REQUIRE(settled.is_ok());
+    CHECK(settled.value().state == OrderState::Live);
     CHECK(settled.value().exchange_order_id == "ord-gw1");
+}
+
+TEST_CASE("pending orders count toward the projected position")
+{
+    FakeConnector connector;
+    std::mutex mutex;
+    std::condition_variable cv;
+    int venue_entries = 0;
+    bool release = false;
+    connector.place_impl = [&](const OrderRequest& a_request) -> Result<OrderPlacement> {
+        {
+            const std::lock_guard lock(mutex);
+            ++venue_entries;
+            cv.notify_all();
+        }
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return release; });
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-" + a_request.client_order_id};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, risk_with_position("1")};
+
+    std::thread first([&] {
+        const auto outcome = oms.place(buy_request("b1", "1"));
+        REQUIRE(outcome.is_ok());
+    });
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return venue_entries == 1; }); // b1 pending in-flight
+    }
+    // b1's venue call is still open, but it is registry exposure: a
+    // second buy breaches the position limit without any venue call
+    const auto over = oms.place(buy_request("b2", "0.5"));
+    REQUIRE_FALSE(over.is_ok());
+    CHECK(over.error().code == "risk_max_position");
+    CHECK(connector.placed.size() == 1);
+
+    {
+        const std::lock_guard lock(mutex);
+        release = true;
+        cv.notify_all();
+    }
+    first.join();
+    CHECK(oms.query("b1").value().state == OrderState::Live);
+}
+
+TEST_CASE("a place whose place_submitted cannot persist is never sent")
+{
+    FakeConnector connector;
+    EventLog log{std::filesystem::temp_directory_path() / "gateway_no_such_dir" / "x.jsonl"};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
+
+    const auto outcome = oms.place(buy_request());
+    REQUIRE_FALSE(outcome.is_ok());
+    CHECK(outcome.error().code == "persistence");
+    // nothing sent, nothing recorded: the clientOrderId is still free
+    CHECK(connector.placed.empty());
+    CHECK(oms.stats().known_orders == 0);
+    CHECK(oms.stats().log_write_failures == 1);
+    CHECK_FALSE(oms.query("gw1").is_ok());
 }
 
 // ------------------------------------------------------- execution feeds ----
@@ -915,6 +1080,110 @@ TEST_CASE("restart drill: replay + reconcile reconstructs in-flight fills")
     REQUIRE(replayed.is_ok());
     CHECK(replayed.value().replayed);
     CHECK(connector.placed.empty());
+}
+
+TEST_CASE("restart drill: torn place_submitted with no place_accepted")
+{
+    // Instance 1 crashed between persisting the place intent and the
+    // venue ack: the log ends at place_submitted. Replay leaves a
+    // Pending entry; reconciliation decides its fate.
+    const auto path = temp_log_path("torn_submitted");
+    std::filesystem::remove(path);
+    {
+        EventLog log{path};
+        CHECK_FALSE(log.append({{"type", "place_submitted"},
+                                {"clientOrderId", "gw1"},
+                                {"symbol", "BTC-USDT"},
+                                {"venue", "okx"},
+                                {"side", "buy"},
+                                {"orderType", "limit"},
+                                {"price", "50000"},
+                                {"quantity", "2"},
+                                {"timeInForce", "GTC"}})
+                        .has_value());
+    }
+
+    FakeConnector connector;
+    EventLog log{path};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
+    REQUIRE(oms.load_from_log().is_ok());
+
+    // replay restores the pending entry with its full intent
+    const auto pending = oms.query("gw1");
+    REQUIRE(pending.is_ok());
+    CHECK(pending.value().state == OrderState::Pending);
+    CHECK(pending.value().exchange_order_id.empty());
+    CHECK(pending.value().symbol == "BTC-USDT");
+    CHECK(pending.value().quantity == "2");
+
+    // the unacked id replays pending: no venue re-send
+    const auto replayed = oms.place(buy_request("gw1", "2"));
+    REQUIRE(replayed.is_ok());
+    CHECK(replayed.value().replayed);
+    CHECK(replayed.value().record.state == OrderState::Pending);
+    REQUIRE(connector.placed.empty());
+
+    // and it cannot be canceled or amended meanwhile
+    CHECK(oms.cancel("gw1").error().code == "order_pending");
+    CHECK(oms.amend(AmendCommand{"gw1", std::optional<std::string>{"1"}, std::nullopt})
+              .error()
+              .code == "order_pending");
+
+    const OrderSnapshot venue_state{.client_order_id = "gw1",
+                                    .exchange_order_id = "ord-gw1",
+                                    .instrument_id = "BTC-USDT",
+                                    .state = OrderState::PartiallyFilled,
+                                    .side = Side::Buy,
+                                    .type = OrderType::Limit,
+                                    .price = "50000",
+                                    .quantity = "2",
+                                    .filled_quantity = "0.7",
+                                    .average_fill_price = "49999.5"};
+
+    SUBCASE("found on the venue: snapshot adopts the pending entry forward")
+    {
+        connector.get_impl =
+            [&venue_state](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{venue_state}};
+        };
+        const auto reconcile_report = oms.reconcile();
+        CHECK(reconcile_report.updated == 1);
+        const auto record = oms.query("gw1");
+        REQUIRE(record.is_ok());
+        CHECK(record.value().state == OrderState::PartiallyFilled);
+        CHECK(record.value().filled_quantity == "0.7");
+        CHECK(record.value().exchange_order_id == "ord-gw1");
+    }
+
+    SUBCASE("conclusively absent: Rejected (venue never saw it)")
+    {
+        connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Error{"venue:51603", "Order does not exist"};
+        };
+        const auto reconcile_report = oms.reconcile();
+        CHECK(reconcile_report.absent_rejected == 1);
+        const auto record = oms.query("gw1");
+        REQUIRE(record.is_ok());
+        CHECK(record.value().state == OrderState::Rejected);
+        REQUIRE(record.value().rejection.has_value());
+        CHECK(record.value().rejection->code == "venue_absent");
+        // retries replay the deterministic rejection
+        const auto retry = oms.place(buy_request("gw1", "2"));
+        REQUIRE_FALSE(retry.is_ok());
+        CHECK(retry.error().code == "venue_absent");
+    }
+
+    SUBCASE("venue unreachable: kept pending, counted unresolved")
+    {
+        connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Error{"transport", "venue unreachable"};
+        };
+        const auto reconcile_report = oms.reconcile();
+        CHECK(reconcile_report.unresolved == 1);
+        const auto record = oms.query("gw1");
+        REQUIRE(record.is_ok());
+        CHECK(record.value().state == OrderState::Pending); // kept, not guessed
+    }
 }
 
 TEST_CASE("stats expose registry size and arbitration counters")
