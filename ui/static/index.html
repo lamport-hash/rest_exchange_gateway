@@ -254,8 +254,14 @@ curl -s localhost:8080/health</pre>
         <span class="muted">illegal transitions are discarded, never errors — one rule arbitrates duplicates, out-of-order WS and REST-vs-WS races</span>
       </div>
       <pre class="mermaid-src" id="diagram-state">stateDiagram-v2
-    [*] --> Live : venue ack
-    [*] --> Rejected : risk / venue rejection
+    [*] --> Pending : place staged/sent (gateway-local)
+    [*] --> Rejected : risk rejection
+    Pending --> Pending : duplicate observation / retry replay
+    Pending --> Live : venue ack (exchangeOrderId set)
+    Pending --> PartiallyFilled : fill races the ack (skips Live)
+    Pending --> Filled : full fill races the ack
+    Pending --> Rejected : venue reject / reconcile - venue absent
+    Live --> Live : duplicate live observation (no-op)
     Live --> PartiallyFilled : partial fill
     Live --> Filled : full fill
     Live --> Canceled : cancel ack
@@ -263,6 +269,7 @@ curl -s localhost:8080/health</pre>
     PartiallyFilled --> PartiallyFilled : more fills (monotonic)
     PartiallyFilled --> Filled : full fill
     PartiallyFilled --> Canceled : cancel ack
+    PartiallyFilled --> Rejected : reconcile - venue absent
     Filled --> [*]
     Canceled --> [*]
     Rejected --> [*]</pre>

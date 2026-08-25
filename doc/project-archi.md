@@ -64,7 +64,9 @@ flowchart TB
 
 - Exchange-specific code lives only inside its adapter subdirectory and is never referenced from the REST layer.
 - Common order schema: `clientOrderId`, `venue` (OKX | BINANCE), `symbol`, `side`, `type` (Market/Limit), `price`, `quantity`, `timeInForce`.
-- Normalized execution states: Pending (gateway-local: place sent, venue has not acked), New/Live, Partially Filled, Filled, Canceled, Rejected. Mapping between client-level concepts and exchange-specific semantics must be explicit; venue reports never carry Pending.
+- Normalized execution states: Pending (gateway-local: place sent, venue has not acked), New/Live (a single state, entered on the venue ack), Partially Filled, Filled, Canceled, Rejected. Mapping between client-level concepts and exchange-specific semantics must be explicit; venue reports never carry Pending.
+- An order is born Pending: a place that passes risk is recorded Pending and persisted (`place_submitted`) before the venue call, so an unacked POST /orders returns 202 `{state:"pending", exchangeOrderId:""}`; duplicate in-flight POSTs replay that 202.
+- Pending resolution: venue ack → Live (exchangeOrderId set); a fill racing the ack → PartiallyFilled/Filled (skips Live); definitive venue rejection or reconciliation proving venue-absence → Rejected; transport-unresolved → stays Pending (resolved later by a racing report or reconcile). Pending → Canceled is illegal — cancel/amend of a pending order is `order_pending` (409, never a venue call). Full legal-transition table: `kLegalTransitions` in `src/core/order_state.hpp`; diagram in `doc/api.md`.
 
 ## Robustness Requirements
 

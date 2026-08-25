@@ -194,6 +194,7 @@ stateDiagram-v2
     Pending --> PartiallyFilled : fill races the ack (skips Live)
     Pending --> Filled : full fill races the ack
     Pending --> Rejected : venue reject / reconcile - venue absent
+    Live --> Live : duplicate live observation (no-op)
     Live --> PartiallyFilled : partial fill
     Live --> Filled : full fill
     Live --> Canceled : cancel ack
@@ -201,6 +202,7 @@ stateDiagram-v2
     PartiallyFilled --> PartiallyFilled : more fills (monotonic)
     PartiallyFilled --> Filled : full fill
     PartiallyFilled --> Canceled : cancel ack
+    PartiallyFilled --> Rejected : reconcile - venue absent
     Filled --> [*]
     Canceled --> [*]
     Rejected --> [*]

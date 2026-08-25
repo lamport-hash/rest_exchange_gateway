@@ -63,6 +63,7 @@ Implement at least:
 
 Normalized execution states:
 
+- Pending (gateway-local: place sent, venue has not acked)
 - New / Live
 - Partially Filled
 - Filled
