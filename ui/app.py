@@ -428,11 +428,22 @@ ORDER_FLOW_SPEC: dict[str, Any] = {
             "tests": ["oms_test", "okx_rest_client_test", "okx_connector_test", "binance_connector_test", "rest_api_test", "blackbox", "live_okx", "live_binance"],
         },
         {
+            "id": "state-pending",
+            "requirement": "Normalized state: Pending (gateway-local)",
+            "implementation": [
+                {"ref": "src/core/oms.cpp:347", "what": "place() records Pending + persists place_submitted BEFORE the venue call"},
+                {"ref": "src/core/order_state.hpp:16", "what": "Pending resolves forward only (ack/fill/reject); Pending -> Canceled illegal"},
+                {"ref": "src/core/oms.cpp:436", "what": "order_pending refusal — cancel/amend of an unacked order never reaches the venue"},
+                {"ref": "src/rest/order_routes.cpp:251", "what": "unacked place: 202 {state:pending, exchangeOrderId:\"\"}, duplicate POSTs replay it"},
+            ],
+            "tests": ["order_state_test", "oms_test", "rest_api_test"],
+        },
+        {
             "id": "state-live",
             "requirement": "Normalized state: New / Live",
             "implementation": [
-                {"ref": "include/gateway/exchange_connector.hpp:29", "what": "OrderState enum — the five normalized states"},
-                {"ref": "src/core/order_state.hpp:29", "what": "kLegalTransitions — explicit legal-transition table"},
+                {"ref": "include/gateway/exchange_connector.hpp:35", "what": "OrderState enum — the six normalized states"},
+                {"ref": "src/core/order_state.hpp:35", "what": "kLegalTransitions — explicit legal-transition table"},
             ],
             "tests": ["order_state_test", "oms_test", "okx_wire_test", "binance_wire_test"],
         },
@@ -441,7 +452,7 @@ ORDER_FLOW_SPEC: dict[str, Any] = {
             "requirement": "Normalized state: Partially Filled",
             "implementation": [
                 {"ref": "src/core/oms.cpp:582", "what": "apply_observation — monotonic fill high-water mark"},
-                {"ref": "src/core/order_state.hpp:29", "what": "transition table (partial -> partial/filled/canceled legal)"},
+                {"ref": "src/core/order_state.hpp:35", "what": "transition table (partial -> partial/filled/canceled legal)"},
             ],
             "tests": ["order_state_test", "oms_test", "okx_connector_test"],
         },
@@ -505,6 +516,12 @@ ORDER_FLOW_SPEC: dict[str, Any] = {
         },
     ],
     "state_mapping": [
+        {
+            "state": "pending",
+            "meaning": "place sent, venue has not acked — gateway-local; unacked POST replays 202 until a venue observation or reconcile resolves it",
+            "okx": "no wire state — venue reports never carry it",
+            "binance": "no wire state — venue reports never carry it",
+        },
         {
             "state": "live",
             "meaning": "New / Live — venue acked, working on the book",

@@ -125,6 +125,13 @@ setTimeout(() => {
   check("state-live covered (all executed suites passed)",
         stateLive.querySelector(".badge").textContent === "covered");
 
+  const statePending = byFirstCell("Normalized state: Pending (gateway-local)");
+  check("state-pending row present + covered (order_state/oms passed)",
+        statePending != null && statePending.querySelector(".badge").textContent === "covered");
+  check("state-pending impl refs cite the born-Pending staging",
+        statePending.textContent.includes("place_submitted") &&
+        statePending.textContent.includes("BEFORE the venue call"));
+
   const explicit = byFirstCell("Client <-> exchange semantics mapping is explicit");
   check("explicit-mapping running… (okx_connector_test running, none failed)",
         explicit.querySelector(".badge").textContent === "running…");
@@ -148,7 +155,11 @@ setTimeout(() => {
         stateRows.length === specPayload.state_mapping.length);
   check("canceled row lists EXPIRED_IN_MATCH",
         stateRows.some((r) => r.textContent.includes("EXPIRED_IN_MATCH")));
-  check("state chips reuse .state classes", stateRows[0].querySelector(".state.live") != null);
+  check("pending row first — gateway-local, never on the wire",
+        stateRows[0].querySelector(".state.pending") != null &&
+        stateRows[0].textContent.includes("gateway-local") &&
+        stateRows[0].textContent.includes("never carry it"));
+  check("state chips reuse .state classes", stateRows[1].querySelector(".state.live") != null);
   check("mapping note set", $("#statemap-note").textContent.includes("nullopt"));
 
   console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");
