@@ -9,6 +9,7 @@
 #include "core/oms.hpp"
 #include "exchange/okx/okx_connector.hpp"
 #include "exchange/okx/okx_rest_client.hpp"
+#include "rest/consistency_routes.hpp"
 #include "rest/okx_demo_routes.hpp"
 #include "rest/order_routes.hpp"
 #include "rest/risk_routes.hpp"
@@ -1081,6 +1082,44 @@ TEST_CASE("health endpoint answers ok with registry stats")
     const auto body = nlohmann::json::parse(res->body);
     CHECK(body["status"] == "ok");
     CHECK(body["knownOrders"] == 1);
+    CHECK(body.contains("reportsBuffered"));
+    CHECK(body["reportsBuffered"] == 0);
+}
+
+TEST_CASE("consistency endpoint serves the latest audit snapshot")
+{
+    auto cache = std::make_shared<gateway::rest::ConsistencyCache>();
+    GatewayFixture fixture{GatewayFixture::Options{},
+                           [&cache](crow::SimpleApp& a_app, OkxConnector&, OkxMockServer&,
+                                    OkxMockWsServer&) {
+                               gateway::rest::register_consistency_routes(a_app, *cache);
+                           }};
+
+    // before any audit ran: an explicit not_run_yet marker, not a lie
+    const auto initial = fixture.client().Get("/consistency");
+    REQUIRE(initial->status == 200);
+    const auto initial_body = nlohmann::json::parse(initial->body);
+    CHECK(initial_body["status"] == "not_run_yet");
+
+    // once the scheduler stores a pass, that snapshot is served verbatim
+    const nlohmann::json alert = {{"clientOrderId", "gw1"},
+                                  {"check", "fill_state_mismatch"},
+                                  {"detail", "zombie"}};
+    cache->store(nlohmann::json{{"ts", "2026-08-25T10:00:00.000Z"},
+                                {"status", "ok"},
+                                {"ordersChecked", 1},
+                                {"venueLookups", 1},
+                                {"lookupFailures", 0},
+                                {"alerts", nlohmann::json::array({alert})},
+                                {"totalAlerts", 1}});
+    const auto res = fixture.client().Get("/consistency");
+    REQUIRE(res->status == 200);
+    const auto body = nlohmann::json::parse(res->body);
+    CHECK(body["status"] == "ok");
+    CHECK(body["ordersChecked"] == 1);
+    CHECK(body["alerts"].size() == 1);
+    CHECK(body["alerts"][0]["check"] == "fill_state_mismatch");
+    CHECK(body["totalAlerts"] == 1);
 }
 
 TEST_CASE("a fully filled order terminates with its fill retained")

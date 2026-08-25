@@ -14,6 +14,8 @@
 # risk limits (maxQty, maxNotional, maxPosition), structured error
 # mapping (400/404/409/502), the private execution feed (login,
 # subscribe, execution reports on place/amend/cancel/fill), real fills,
+# the amend-to-cross-mid race (three resting orders amended across the
+# mid: full instant fills racing the amend acks -> state filled),
 # persistence + restart recovery, venue reconciliation with adoption of
 # orders placed directly on the venue, and the transport-failure path
 # (venue unreachable -> retry budget exhausted -> 502) against a really
@@ -37,10 +39,11 @@
 # credentials and demo funds (Binance testnet: >= ~20 USDT and a little
 # BTC); internet access. The suite cancels or leaves canceled every
 # order it creates. It spends a tiny amount of demo funds: one
-# aggressive limit buy of ~0.00011 BTC, then sells 0.0001 BTC back via a
-# market order (round-trip, net BTC change ~0). On Binance the position
-# test additionally locks ~0.13 BTC * far-price (~5600 USDT) while it
-# runs, then cancels.
+# aggressive limit buy of ~0.00011 BTC, three crossing amends of
+# 3 x BASE_QTY BTC, then sells 0.0001 BTC back via a
+# market order (round-trip, net BTC change ~+3 x BASE_QTY). On Binance
+# the position test additionally locks ~0.13 BTC * far-price
+# (~5600 USDT) while it runs, then cancels.
 #
 # Usage (host or inside the dev container — the script re-execs itself in
 # the container when started on the host):
@@ -543,6 +546,71 @@ else
     assert_contains "order_terminal code (amend)" "$BODY" '"code":"order_terminal"'
 fi
 
+# ---- 14b. three far orders amended across the mid fill instantly ----------
+echo "== 14b. amend-to-cross-mid: 3 resting orders fill instantly =="
+# The regression rig for the amend/fill race: each amend crosses the mid
+# so the venue fully executes the replacement while the amend response
+# is still in flight (old leg CANCELED + replacement NEW + replacement
+# FILLED racing the ack). Every order must settle in state filled with
+# its full fill — never a zombie live-with-full-fill — and the
+# consistency audit must stay silent about them.
+if [ -z "$LAST" ]; then
+    bad "skipping amend-to-cross test (no ticker, section 14 did not run)"
+else
+    CROSS="$(python3 -c "print(int(float('$LAST') * 1.003) + 1)")"
+    echo "   last=$LAST -> crossing px=$CROSS (3 buys of $BASE_QTY)"
+    ID_X1="$(new_id XA)"
+    ID_X2="$(new_id XB)"
+    ID_X3="$(new_id XC)"
+    ORD_X1="" ; ORD_X2="" ; ORD_X3=""
+    for TAG in 1 2 3; do
+        eval "ID=\$ID_X$TAG"
+        gw POST /orders "$(place_body "$ID" "$FAR_PX" "$BASE_QTY")"
+        assert_eq "resting place $ID -> 201" "201" "$STATUS"
+        [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
+        eval "ORD_X$TAG=\"\$(json_field \"\$BODY\" exchangeOrderId)\""
+    done
+
+    for TAG in 1 2 3; do
+        eval "ID=\$ID_X$TAG"
+        gw PUT "/orders/$ID" "{\"price\":\"$CROSS\"}"
+        assert_eq "amend $ID across the mid -> 200" "200" "$STATUS"
+        [ "$STATUS" != "200" ] && echo "   venue reason: $(json_field "$BODY" reason)"
+        echo "   amend $ID ack state: $(json_field "$BODY" state)"
+    done
+
+    for TAG in 1 2 3; do
+        eval "ID=\$ID_X$TAG"
+        if wait_state "$ID" filled 25; then
+            ok "$ID reached state filled after the crossing amend"
+        else
+            bad "$ID did not fill within 25s (state=$STATE)"
+        fi
+        gw GET "/orders/$ID"
+        assert_num_eq "$ID filledQuantity == quantity" "$BASE_QTY" \
+            "$(json_field "$BODY" filledQuantity)"
+        [ -n "$(json_field "$BODY" averageFillPrice)" ] &&
+            ok "$ID averageFillPrice=$(json_field "$BODY" averageFillPrice)" ||
+            bad "$ID has no averageFillPrice"
+        eval "ORD=\$ORD_X$TAG"
+        if [ "$VENUE" = "binance" ]; then
+            assert_ne "$ID cancelReplace minted a new venue id" "$ORD" \
+                "$(json_field "$BODY" exchangeOrderId)"
+        else
+            assert_eq "$ID in-place amend kept the venue id" "$ORD" \
+                "$(json_field "$BODY" exchangeOrderId)"
+        fi
+    done
+
+    gw GET /consistency
+    assert_eq "GET /consistency -> 200" "200" "$STATUS"
+    if printf '%s' "$BODY" | grep -Eq "\"clientOrderId\":\"($ID_X1|$ID_X2|$ID_X3)\""; then
+        bad "consistency alerts reference the crossing orders: $BODY"
+    else
+        ok "no consistency alerts reference the crossing orders"
+    fi
+fi
+
 # ---- 15. market order happy path -------------------------------------------
 echo "== 15. market order fills on the venue =="
 # Sells the BTC bought in section 14 (0.00011 minus the taker fee leaves
@@ -696,8 +764,20 @@ if [ "$VENUE" = "okx" ] && python3 -c "import json,sys; sys.exit(0 if json.load(
     echo "== 18b. OKX demo balance adjustment (demo-adjust-balance) =="
     gw POST /venue/okx/demo-adjust-balance \
         '{"type":"increase","adjustments":[{"ccy":"USDT","amt":"1"}]}'
-    assert_eq "demo balance increase -> 200" "200" "$STATUS"
-    assert_eq "venue echoed" "okx" "$(json_field "$BODY" venue)"
+    if [ "$STATUS" = "200" ]; then
+        assert_eq "demo balance increase -> 200" "200" "$STATUS"
+        assert_eq "venue echoed" "okx" "$(json_field "$BODY" venue)"
+    elif [ "$STATUS" = "409" ] && printf '%s' "$BODY" | grep -q '59691'; then
+        # OKX caps demo increases at 3/day (UTC) per account — and this
+        # suite consumes one per run. The quota error must still surface
+        # with its venue code (never an empty reason); the increase
+        # itself is re-validated any day with quota left.
+        assert_contains "quota exhaustion surfaces the venue code" "$BODY" '59691'
+        echo "  note: daily increase quota exhausted (0/3 left; resets 00:00 UTC)"
+    else
+        bad "demo balance increase -> 200 (expected [200] got [$STATUS])"
+        bad "venue echoed (got [$(json_field "$BODY" venue)])"
+    fi
     gw POST /venue/okx/demo-adjust-balance \
         '{"type":"reduce","adjustments":[{"ccy":"USDT","amt":"1"}]}'
     assert_eq "demo balance reduce (restored) -> 200" "200" "$STATUS"

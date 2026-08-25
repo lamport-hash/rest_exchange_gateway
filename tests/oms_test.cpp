@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -1266,6 +1267,551 @@ TEST_CASE("get_price routes to the resolved venue and reports it")
         REQUIRE_FALSE(quote.is_ok());
         CHECK(quote.error().code == "transport");
     }
+}
+
+// ---------------------------------------------- versioned legs / amend race ----
+
+TEST_CASE("an amend racing its own cancelReplace reports lands Filled, not a zombie Live")
+{
+    // The exact production incident: Binance cancelReplace delivers the
+    // old leg's CANCELED, the replacement's NEW and its FILLED on the
+    // feed thread before the amend response returns. All three must be
+    // buffered, then applied after the amended event installs the new
+    // leg: the old CANCELED arbitrates superseded, the replacement fills
+    // drive the record to Filled.
+    const auto path = temp_log_path("amend_race");
+    std::filesystem::remove(path);
+
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest& a_request) {
+        // the whole venue-side amend plays out before the response lands
+        oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0"));
+        oms_ptr->on_execution_report(ExecutionReport{.client_order_id = "gw1",
+                                                     .exchange_order_id = "ord-gw1-repl",
+                                                     .state = OrderState::Live,
+                                                     .side = Side::Buy,
+                                                     .filled_quantity = "0",
+                                                     .average_fill_price = ""});
+        oms_ptr->on_execution_report(ExecutionReport{.client_order_id = "gw1",
+                                                     .exchange_order_id = "ord-gw1-repl",
+                                                     .state = OrderState::Filled,
+                                                     .side = Side::Buy,
+                                                     .filled_quantity = "2",
+                                                     .average_fill_price = "79272.01"});
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-gw1-repl"};
+    };
+    EventLog log{path};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request("gw1", "2")).is_ok()); // leg 1: ord-gw1
+
+    const auto amended = oms.amend(AmendCommand{"gw1", "79291.1", std::nullopt});
+    REQUIRE(amended.is_ok());
+    CHECK(amended.value().state == OrderState::Filled); // not a zombie Live
+    CHECK(amended.value().filled_quantity == "2");
+    CHECK(amended.value().average_fill_price == "79272.01");
+    CHECK(amended.value().exchange_order_id == "ord-gw1-repl");
+
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    REQUIRE(record.value().legs.size() == 2);
+    CHECK(record.value().legs[0].version == 1);
+    CHECK(record.value().legs[0].exchange_order_id == "ord-gw1");
+    CHECK(record.value().legs[1].version == 2);
+    CHECK(record.value().legs[1].exchange_order_id == "ord-gw1-repl");
+
+    // all three reports passed through the buffer
+    CHECK(oms.stats().reports_buffered == 3);
+
+    // replay-correct event order: the amended event precedes the fill state
+    std::ifstream file(path);
+    std::vector<std::string> order;
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto event = nlohmann::json::parse(line, nullptr, false);
+        if (!event.is_discarded() && event.contains("type")) {
+            order.push_back(event["type"].get<std::string>());
+        }
+    }
+    const auto amended_at = std::find(order.begin(), order.end(), "amended");
+    const auto filled_at = std::find(order.begin(), order.end(), "state");
+    REQUIRE(amended_at != order.end());
+    REQUIRE(filled_at != order.end());
+    CHECK(amended_at < filled_at);
+
+    // and a restart replays the same terminal truth
+    FakeConnector replay_connector;
+    EventLog replay_log{path};
+    OrderManagementSystem recovered{{{"okx", &replay_connector}}, &replay_log, RiskConfig{}};
+    REQUIRE(recovered.load_from_log().is_ok());
+    const auto replayed = recovered.query("gw1");
+    REQUIRE(replayed.is_ok());
+    CHECK(replayed.value().state == OrderState::Filled);
+    CHECK(replayed.value().filled_quantity == "2");
+    REQUIRE(replayed.value().legs.size() == 2);
+    CHECK(replayed.value().legs[1].exchange_order_id == "ord-gw1-repl");
+}
+
+TEST_CASE("three resting orders amended across the mid all fill instantly")
+{
+    // Production shape of the "amend to cross" play: three resting buys
+    // far below mid are each amended to a crossing price. The venue
+    // plays out the whole amend on the feed thread BEFORE the amend
+    // response returns: old-leg CANCELED, the replacement going LIVE,
+    // the replacement fully FILLED. All three orders must land Filled
+    // (never a zombie Live) with their fills, a correct two-leg table
+    // and replay-correct event order (amended -> state filled).
+    const auto path = temp_log_path("cross_mid");
+    std::filesystem::remove(path);
+
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest& a_request) {
+        const std::string id = a_request.client_order_id;
+        const std::string replacement = "ord-" + id + "-repl";
+        // the old resting leg is canceled untouched...
+        oms_ptr->on_execution_report(report(id, OrderState::Canceled, "0"));
+        // ...the replacement goes live and fills instantly at the cross
+        oms_ptr->on_execution_report(ExecutionReport{.client_order_id = id,
+                                                     .exchange_order_id = replacement,
+                                                     .state = OrderState::Live,
+                                                     .side = Side::Buy,
+                                                     .filled_quantity = "0",
+                                                     .average_fill_price = ""});
+        oms_ptr->on_execution_report(ExecutionReport{.client_order_id = id,
+                                                     .exchange_order_id = replacement,
+                                                     .state = OrderState::Filled,
+                                                     .side = Side::Buy,
+                                                     .filled_quantity = "1",
+                                                     .average_fill_price = "79500"});
+        return OrderPlacement{.client_order_id = id, .exchange_order_id = replacement};
+    };
+    EventLog log{path};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
+    oms_ptr = &oms;
+
+    // three resting buys far below the mid
+    for (const std::string id : {"gw1", "gw2", "gw3"}) {
+        INFO("placing " << id);
+        REQUIRE(oms.place(buy_request(id, "1")).is_ok());
+    }
+
+    // each is amended across the mid: the ack itself carries the fill
+    for (const std::string id : {"gw1", "gw2", "gw3"}) {
+        INFO("amending " << id);
+        const auto amended = oms.amend(AmendCommand{id, "80000", std::nullopt});
+        REQUIRE(amended.is_ok());
+        CHECK(amended.value().state == OrderState::Filled); // not a zombie Live
+        CHECK(amended.value().filled_quantity == "1");
+        CHECK(amended.value().average_fill_price == "79500");
+        CHECK(amended.value().price == "80000");
+    }
+
+    // registry truth per order: filled, two-leg table, current = replacement
+    for (const std::string id : {"gw1", "gw2", "gw3"}) {
+        INFO("checking " << id);
+        const auto record = oms.query(id);
+        REQUIRE(record.is_ok());
+        CHECK(record.value().state == OrderState::Filled);
+        CHECK(record.value().filled_quantity == "1");
+        REQUIRE(record.value().legs.size() == 2);
+        CHECK(record.value().legs[0].version == 1);
+        CHECK(record.value().legs[0].exchange_order_id == "ord-" + id);
+        CHECK(record.value().legs[1].version == 2);
+        CHECK(record.value().legs[1].exchange_order_id == "ord-" + id + "-repl");
+        CHECK(record.value().exchange_order_id == "ord-" + id + "-repl");
+    }
+
+    // all nine reports passed through the race buffer
+    CHECK(oms.stats().reports_buffered == 9);
+
+    // the persisted event order is replay-correct per order:
+    // place_submitted -> place_accepted -> amended -> state(filled)
+    std::ifstream file(path);
+    std::map<std::string, std::vector<std::string>> sequence;
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto event = nlohmann::json::parse(line, nullptr, false);
+        if (event.is_discarded() || !event.contains("type")) {
+            continue;
+        }
+        sequence[event["clientOrderId"].get<std::string>()].push_back(
+            event["type"].get<std::string>());
+    }
+    for (const auto& [id, types] : sequence) {
+        REQUIRE(types.size() == 4);
+        CHECK(types[0] == "place_submitted");
+        CHECK(types[1] == "place_accepted");
+        CHECK(types[2] == "amended");
+        CHECK(types[3] == "state");
+    }
+
+    // a restart replays the same terminal truth for all three
+    FakeConnector replay_connector;
+    EventLog replay_log{path};
+    OrderManagementSystem recovered{{{"okx", &replay_connector}}, &replay_log, RiskConfig{}};
+    REQUIRE(recovered.load_from_log().is_ok());
+    for (const std::string id : {"gw1", "gw2", "gw3"}) {
+        const auto replayed = recovered.query(id);
+        REQUIRE(replayed.is_ok());
+        CHECK(replayed.value().state == OrderState::Filled);
+        CHECK(replayed.value().filled_quantity == "1");
+        REQUIRE(replayed.value().legs.size() == 2);
+        CHECK(replayed.value().legs[1].exchange_order_id == "ord-" + id + "-repl");
+    }
+}
+
+TEST_CASE("a partial fill racing the amend keeps its fills across legs")
+{    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest& a_request) {
+        // the old leg partially filled 0.4 before the cancel landed
+        oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0.4"));
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-gw1-repl"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request("gw1", "2")).is_ok());
+
+    const auto amended = oms.amend(AmendCommand{"gw1", "48000", std::nullopt});
+    REQUIRE(amended.is_ok());
+    CHECK(amended.value().state == OrderState::Live); // not terminalized
+    CHECK(amended.value().filled_quantity == "0.4"); // the fill survived
+}
+
+TEST_CASE("an in-place amend advances the version while repeating the id")
+{
+    // OKX-style amend: the venue echoes the same exchange order id.
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    REQUIRE(oms.place(buy_request("gw1", "2")).is_ok());
+
+    REQUIRE(oms.amend(AmendCommand{"gw1", "48000", std::nullopt}).is_ok());
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    REQUIRE(record.value().legs.size() == 2);
+    CHECK(record.value().legs[0].version == 1);
+    CHECK(record.value().legs[1].version == 2);
+    CHECK(record.value().legs[1].exchange_order_id == "ord-gw1"); // same id
+
+    // reports on that id still drive the full lifecycle (newest match wins)
+    oms.on_execution_report(report("gw1", OrderState::PartiallyFilled, "1", "47999"));
+    CHECK(oms.query("gw1").value().state == OrderState::PartiallyFilled);
+}
+
+TEST_CASE("an amend failing while its replacement provably went live adopts the leg")
+{
+    // Amend response lost in transport, but the buffered reports show the
+    // cancelReplace landed: old CANCELED + replacement LIVE. The record
+    // must stay live on the adopted leg instead of terminalizing on the
+    // old one.
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest&) {
+        oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0"));
+        oms_ptr->on_execution_report(ExecutionReport{.client_order_id = "gw1",
+                                                     .exchange_order_id = "ord-gw1-repl",
+                                                     .state = OrderState::Live,
+                                                     .side = Side::Buy,
+                                                     .filled_quantity = "0",
+                                                     .average_fill_price = ""});
+        return Error{"transport", "amend outcome unresolved"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request()).is_ok());
+
+    const auto failed = oms.amend(AmendCommand{"gw1", "48000", std::nullopt});
+    REQUIRE_FALSE(failed.is_ok());
+    CHECK(failed.error().code == "transport");
+
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    CHECK(record.value().state == OrderState::Live); // replacement is live
+    CHECK(record.value().exchange_order_id == "ord-gw1-repl");
+    REQUIRE(record.value().legs.size() == 2);
+    CHECK(oms.stats().legs_discovered == 1);
+}
+
+TEST_CASE("an amend failing after a real cancel terminalizes as Canceled")
+{
+    // Partial success: the cancel leg landed, no replacement exists. The
+    // old leg's CANCELED is the venue truth and applies in full.
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest&) {
+        oms_ptr->on_execution_report(report("gw1", OrderState::Canceled, "0"));
+        return Error{"venue:-2011",
+                     "amend outcome partially unknown: original order is CANCELED"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request()).is_ok());
+
+    const auto failed = oms.amend(AmendCommand{"gw1", "48000", std::nullopt});
+    REQUIRE_FALSE(failed.is_ok());
+    CHECK(oms.query("gw1").value().state == OrderState::Canceled);
+    CHECK(oms.stats().legs_discovered == 0);
+}
+
+TEST_CASE("a concurrent amend against an in-flight amend is rejected order_busy")
+{
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    connector.amend_impl = [&oms_ptr](const AmendRequest& a_request) {
+        // a second amend arrives while this venue call is open
+        const auto racing = oms_ptr->amend(AmendCommand{"gw1", "47000", std::nullopt});
+        REQUIRE_FALSE(racing.is_ok());
+        CHECK(racing.error().code == "order_busy");
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-gw1-repl"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request()).is_ok());
+
+    REQUIRE(oms.amend(AmendCommand{"gw1", "48000", std::nullopt}).is_ok());
+    REQUIRE(connector.amends.size() == 1); // the busy one never reached the venue
+}
+
+TEST_CASE("a report carrying an unknown exchange order id is adopted as a new leg")
+{
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    REQUIRE(oms.place(buy_request("gw1", "2")).is_ok());
+
+    // a replacement we never learned about (lost amend ack)
+    oms.on_execution_report(ExecutionReport{.client_order_id = "gw1",
+                                            .exchange_order_id = "ord-mystery",
+                                            .state = OrderState::PartiallyFilled,
+                                            .side = Side::Buy,
+                                            .filled_quantity = "1",
+                                            .average_fill_price = "48000"});
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    CHECK(record.value().state == OrderState::PartiallyFilled);
+    CHECK(record.value().exchange_order_id == "ord-mystery");
+    REQUIRE(record.value().legs.size() == 2);
+    CHECK(record.value().legs[1].exchange_order_id == "ord-mystery");
+    CHECK(oms.stats().legs_discovered == 1);
+
+    // later reports on the superseded original id contribute fills only
+    oms.on_execution_report(report("gw1", OrderState::Canceled, "1.5"));
+    const auto after = oms.query("gw1");
+    REQUIRE(after.is_ok());
+    CHECK(after.value().state == OrderState::PartiallyFilled); // not Canceled
+    CHECK(after.value().filled_quantity == "1.5");
+
+    // the adoption is surfaced by the audit
+    const auto audited = oms.audit();
+    const auto found = std::count_if(audited.alerts.begin(), audited.alerts.end(),
+                                     [](const ConsistencyAlert& a_alert) {
+                                         return a_alert.check == "unknown_leg_report" &&
+                                                a_alert.client_order_id == "gw1";
+                                     });
+    CHECK(found == 1);
+}
+
+TEST_CASE("legacy amend events without a version replay with the historic resurrection")
+{
+    const auto path = temp_log_path("legacy_amend");
+    std::filesystem::remove(path);
+    {
+        EventLog log{path};
+        // pre-versioning log shape: the runtime bug wrote canceled before
+        // an amended(state=live) that had to resurrect the record
+        CHECK_FALSE(log.append({{"type", "place_accepted"},
+                                {"clientOrderId", "gw1"},
+                                {"symbol", "BTC-USDT"},
+                                {"venue", "okx"},
+                                {"side", "buy"},
+                                {"orderType", "limit"},
+                                {"price", "50000"},
+                                {"quantity", "1"},
+                                {"timeInForce", "GTC"},
+                                {"exchangeOrderId", "ord-gw1"}})
+                         .has_value());
+        CHECK_FALSE(
+            log.append({{"type", "state"},
+                        {"clientOrderId", "gw1"},
+                        {"state", "canceled"},
+                        {"filledQuantity", "0"},
+                        {"averageFillPrice", ""},
+                        {"exchangeOrderId", "ord-gw1"}})
+                .has_value());
+        CHECK_FALSE(log.append({{"type", "amended"},
+                                {"clientOrderId", "gw1"},
+                                {"price", "48000"},
+                                {"quantity", "1"},
+                                {"state", "live"},
+                                {"exchangeOrderId", "ord-gw1-repl"}})
+                         .has_value());
+    }
+
+    FakeConnector connector;
+    EventLog log{path};
+    OrderManagementSystem oms{{{"okx", &connector}}, &log, RiskConfig{}};
+    REQUIRE(oms.load_from_log().is_ok());
+    const auto record = oms.query("gw1");
+    REQUIRE(record.is_ok());
+    CHECK(record.value().state == OrderState::Live); // resurrected, as before
+    REQUIRE(record.value().legs.size() == 2);
+    CHECK(record.value().legs[0].exchange_order_id == "ord-gw1");
+    CHECK(record.value().legs[1].exchange_order_id == "ord-gw1-repl");
+}
+
+// ------------------------------------------------------------------ audit ----
+
+TEST_CASE("audit flags a fill/state zombie without healing it")
+{
+    FakeConnector connector;
+    connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+        return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    REQUIRE(oms.place(buy_request("gw1", "1")).is_ok());
+
+    // a venue reporting a full fill as a mere partial: the registry keeps
+    // it, the audit must call it out
+    oms.on_execution_report(report("gw1", OrderState::PartiallyFilled, "1", "50000"));
+
+    const auto before = oms.query("gw1");
+    REQUIRE(before.is_ok());
+    CHECK(before.value().state == OrderState::PartiallyFilled);
+
+    const auto audited = oms.audit();
+    const auto found = std::count_if(audited.alerts.begin(), audited.alerts.end(),
+                                     [](const ConsistencyAlert& a_alert) {
+                                         return a_alert.check == "fill_state_mismatch" &&
+                                                a_alert.client_order_id == "gw1";
+                                     });
+    CHECK(found == 1);
+
+    // alert-only: nothing was repaired
+    const auto after = oms.query("gw1");
+    REQUIRE(after.is_ok());
+    CHECK(after.value().state == OrderState::PartiallyFilled);
+    CHECK(after.value().filled_quantity == "1");
+}
+
+TEST_CASE("audit compares non-terminal orders against venue truth")
+{
+    FakeConnector connector;
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    REQUIRE(oms.place(buy_request("gw1", "1")).is_ok()); // local: live, 0 filled
+
+    const OrderSnapshot venue_snapshot{.client_order_id = "gw1",
+                                       .exchange_order_id = "ord-gw1",
+                                       .instrument_id = "BTC-USDT",
+                                       .state = OrderState::PartiallyFilled,
+                                       .side = Side::Buy,
+                                       .type = OrderType::Limit,
+                                       .price = "49000.00000000", // venue zero padding
+                                       .quantity = "1",
+                                       .filled_quantity = "0.5",
+                                       .average_fill_price = "49100"};
+
+    SUBCASE("drift on state, fills and price is reported")
+    {
+        connector.get_impl =
+            [&venue_snapshot](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Result<std::optional<OrderSnapshot>>{
+                std::optional<OrderSnapshot>{venue_snapshot}};
+        };
+        const auto audited = oms.audit();
+        CHECK(audited.orders_checked == 1);
+        CHECK(audited.venue_lookups == 1);
+        const auto has = [&audited](const char* a_check) {
+            return std::any_of(audited.alerts.begin(), audited.alerts.end(),
+                               [a_check](const ConsistencyAlert& a_alert) {
+                                   return a_alert.check == a_check &&
+                                          a_alert.client_order_id == "gw1";
+                               });
+        };
+        CHECK(has("state_mismatch"));          // live vs partially_filled
+        CHECK(has("fill_mismatch"));           // 0 vs 0.5
+        CHECK(has("price_qty_mismatch"));      // 50000 vs 49000
+        CHECK_FALSE(has("venue_unknown"));
+    }
+
+    SUBCASE("venue zero padding is not drift")
+    {
+        const OrderSnapshot padded{.client_order_id = "gw1",
+                                   .exchange_order_id = "ord-gw1",
+                                   .instrument_id = "BTC-USDT",
+                                   .state = OrderState::Live,
+                                   .side = Side::Buy,
+                                   .type = OrderType::Limit,
+                                   .price = "50000.00000000",
+                                   .quantity = "1.00000000",
+                                   .filled_quantity = "0.0",
+                                   .average_fill_price = ""};
+        connector.get_impl = [&padded](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{padded}};
+        };
+        const auto audited = oms.audit();
+        CHECK(audited.alerts.empty());
+    }
+
+    SUBCASE("venue-unknown non-terminal orders are reported")
+    {
+        connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
+        };
+        const auto audited = oms.audit();
+        REQUIRE(audited.alerts.size() == 1);
+        CHECK(audited.alerts[0].check == "venue_unknown");
+        CHECK(audited.alerts[0].client_order_id == "gw1");
+    }
+
+    SUBCASE("failing lookups are counted and reported, state untouched")
+    {
+        connector.get_impl = [](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            return Error{"transport", "venue unreachable"};
+        };
+        const auto audited = oms.audit();
+        CHECK(audited.lookup_failures == 1);
+        REQUIRE(audited.alerts.size() == 1);
+        CHECK(audited.alerts[0].check == "lookup_failed");
+        CHECK(oms.query("gw1").value().state == OrderState::Live);
+    }
+
+    SUBCASE("terminal orders are not looked up at all")
+    {
+        oms.on_execution_report(report("gw1", OrderState::Filled, "1", "50000"));
+        std::size_t lookups = 0;
+        connector.get_impl = [&](const OrderQuery&) -> Result<std::optional<OrderSnapshot>> {
+            ++lookups;
+            return Result<std::optional<OrderSnapshot>>{std::optional<OrderSnapshot>{std::nullopt}};
+        };
+        const auto audited = oms.audit();
+        CHECK(audited.venue_lookups == 0);
+        CHECK(lookups == 0);
+    }
+}
+
+TEST_CASE("audit skips orders whose amend venue call is still open")
+{
+    FakeConnector connector;
+    OrderManagementSystem* oms_ptr = nullptr;
+    AuditReport mid_flight;
+    connector.amend_impl = [&oms_ptr, &mid_flight](const AmendRequest& a_request) {
+        // the audit runs while this amend's venue call is open: the order
+        // must be skipped (its own ack path owns it)
+        mid_flight = oms_ptr->audit();
+        return OrderPlacement{.client_order_id = a_request.client_order_id,
+                              .exchange_order_id = "ord-gw1-repl"};
+    };
+    OrderManagementSystem oms{{{"okx", &connector}}, nullptr, RiskConfig{}};
+    oms_ptr = &oms;
+    REQUIRE(oms.place(buy_request()).is_ok());
+
+    REQUIRE(oms.amend(AmendCommand{"gw1", "48000", std::nullopt}).is_ok());
+    CHECK(mid_flight.orders_checked == 1);
+    CHECK(mid_flight.venue_lookups == 0); // skipped, not compared mid-flight
 }
 
 } // namespace

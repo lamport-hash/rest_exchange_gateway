@@ -23,6 +23,10 @@ struct GatewayConfig
     RiskConfig risk;
     /// Venue used when a client order omits the venue field.
     std::string default_venue = "okx";
+    /// Interval of the periodic consistency audit in milliseconds
+    /// (alert-only: it never repairs; reconcile stays the healer).
+    /// 0 disables the scheduler. Default 30000 (30s).
+    std::uint64_t audit_interval_ms = 30000;
     /// Raw venue sections; each exchange adapter parses its own (keeps
     /// src/core free of exchange-specific knowledge). A section present
     /// but empty {} means "venue enabled with default parameters".

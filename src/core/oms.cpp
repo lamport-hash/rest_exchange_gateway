@@ -103,7 +103,8 @@ auto place_accepted_event(const OrderRecord& a_record) -> nlohmann::json
             {"price", a_record.price},
             {"quantity", a_record.quantity},
             {"timeInForce", a_record.time_in_force},
-            {"exchangeOrderId", a_record.exchange_order_id}};
+            {"exchangeOrderId", a_record.exchange_order_id},
+            {"version", a_record.legs.empty() ? 1 : a_record.legs.back().version}};
 }
 
 auto adopted_event(const OrderRecord& a_record) -> nlohmann::json
@@ -133,7 +134,8 @@ auto amended_event(const OrderRecord& a_record) -> nlohmann::json
             {"price", a_record.price},
             {"quantity", a_record.quantity},
             {"state", state_to_string(a_record.state)},
-            {"exchangeOrderId", a_record.exchange_order_id}};
+            {"exchangeOrderId", a_record.exchange_order_id},
+            {"version", a_record.legs.empty() ? 1 : a_record.legs.back().version}};
 }
 
 auto state_event(const OrderRecord& a_record) -> nlohmann::json
@@ -143,7 +145,8 @@ auto state_event(const OrderRecord& a_record) -> nlohmann::json
             {"state", state_to_string(a_record.state)},
             {"filledQuantity", a_record.filled_quantity},
             {"averageFillPrice", a_record.average_fill_price},
-            {"exchangeOrderId", a_record.exchange_order_id}};
+            {"exchangeOrderId", a_record.exchange_order_id},
+            {"version", a_record.legs.empty() ? 1 : a_record.legs.back().version}};
 }
 
 } // namespace
@@ -314,12 +317,12 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
                                                    : a_request.time_in_force,
                               .price = a_request.price,
                               .quantity = a_request.quantity,
-                              .state = OrderState::Pending,
-                              .filled_quantity = "0",
-                              .average_fill_price = "",
-                              .exchange_order_ids = {},
-                              .adopted = false,
-                              .rejection = std::nullopt};
+                               .state = OrderState::Pending,
+                               .filled_quantity = "0",
+                               .average_fill_price = "",
+                               .legs = {},
+                               .adopted = false,
+                               .rejection = std::nullopt};
         const auto limits = risk_.limits_for(a_request.instrument_id);
         if (limits.has_value()) {
             const RiskOrder risk_order{.side = a_request.side,
@@ -362,12 +365,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
 
     { // ---- critical section 2: apply the outcome, drain raced reports ----
         const std::lock_guard lock(mutex_);
-        std::vector<ExecutionReport> raced;
-        if (const auto flying = raced_reports_.find(a_request.client_order_id);
-            flying != raced_reports_.end()) {
-            raced = std::move(flying->second);
-            raced_reports_.erase(flying);
-        }
+        const auto raced = drain_raced_reports(a_request.client_order_id);
         const auto it = lookup(a_request.client_order_id);
         if (it == orders_.end()) {
             return Error{"internal", "pending place vanished for " + a_request.client_order_id};
@@ -393,7 +391,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
             // it). Reports that raced the failure are real observations
             // about the venue-side outcome: apply them.
             for (const auto& entry : raced) {
-                apply_report(record, entry);
+                apply_arbitrated_report(record, entry);
             }
             return placement.error();
         }
@@ -414,7 +412,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
         // event exists, keeping the log replay-correct; the first applied
         // observation may jump Pending -> PartiallyFilled/Filled
         for (const auto& entry : raced) {
-            apply_report(record, entry);
+            apply_arbitrated_report(record, entry);
         }
         return PlaceOutcome{.record = record, .replayed = false};
     }
@@ -533,33 +531,87 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
                             .side = record.side,
                             .type = record.type,
                             .time_in_force = record.time_in_force};
+
+        // Register the raced-reports buffer BEFORE the venue call: on
+        // cancelReplace venues (Binance) the old leg's CANCELED and the
+        // replacement's NEW/FILLED reports can all arrive on the feed
+        // thread before the amend response returns. Buffered here, they
+        // apply (and persist) AFTER the amended event installs the new
+        // leg — the old leg arbitrates as superseded (fills only), the
+        // replacement drives the lifecycle. A concurrent place/amend of
+        // the same order is rejected instead: one mutating venue call.
+        if (!raced_reports_.try_emplace(a_command.client_order_id).second) {
+            return Error{"order_busy",
+                         "a place/amend for " + a_command.client_order_id +
+                             " is still in flight; retry once it resolves"};
+        }
     }
 
     // ---- venue I/O without the lock ----
     const auto placement = connector->amend_order(wire);
-    if (!placement.is_ok()) {
-        return placement.error();
-    }
 
-    { // ---- apply to the (possibly progressed) record ----
+    { // ---- apply to the (definitely unchanged) record, drain raced reports ----
         const std::lock_guard lock(mutex_);
+        const auto raced = drain_raced_reports(a_command.client_order_id);
         const auto it = lookup(a_command.client_order_id);
         if (it == orders_.end()) {
             return Error{"not_found", "unknown clientOrderId " + a_command.client_order_id};
         }
         OrderRecord& record = it->second;
+
+        if (!placement.is_ok()) {
+            // No new leg is installed: the amend did not verifiably land.
+            // A buffered report carrying an UNKNOWN id proves the
+            // replacement actually went live (a lost amend ack): adopt the
+            // newest such id BEFORE applying the batch, so the old leg's
+            // terminal CANCELED arbitrates as superseded instead of
+            // terminalizing the record the live replacement continues.
+            if (!record.legs.empty()) {
+                std::string newest_unknown;
+                for (const auto& entry : raced) {
+                    if (!entry.exchange_order_id.empty() &&
+                        !leg_index_of(record, entry.exchange_order_id).has_value()) {
+                        newest_unknown = entry.exchange_order_id;
+                    }
+                }
+                if (!newest_unknown.empty()) {
+                    note_exchange_id(record, newest_unknown);
+                    ++stats_.legs_discovered;
+                    note_discovered_leg(record.client_order_id, newest_unknown);
+                }
+            }
+            // Buffered reports are real venue observations and still apply
+            // under the (possibly just extended) leg table: the old leg's
+            // own reports arbitrate normally, the adopted replacement
+            // drives the lifecycle.
+            for (const auto& entry : raced) {
+                apply_arbitrated_report(record, entry);
+            }
+            return placement.error();
+        }
+
         record.price = *wire.new_price;
         record.quantity = *wire.new_quantity;
-        // Venues whose amend is a cancel+replace (Binance) issue a NEW
-        // exchangeOrderId for the replacement; in-place amend venues (OKX)
-        // echo the existing one.
-        note_exchange_id(record, placement.value().exchange_order_id);
-        if (record.state == OrderState::Canceled) {
-            // the replaced leg's CANCELED report raced this venue ack; the
-            // venue accepted the replacement, which is live
-            record.state = OrderState::Live;
+        // The venue acked the amend: append the new leg. CancelReplace
+        // venues (Binance) carry a NEW exchangeOrderId; in-place amend
+        // venues (OKX) echo the existing one — the version still
+        // advances. The record was Live/PartiallyFilled throughout (all
+        // racing reports were buffered), so no resurrection is needed.
+        append_amend_leg(record, placement.value().exchange_order_id);
+        const auto persist_error = append_or_error(amended_event(record));
+        if (persist_error.has_value()) {
+            ++stats_.log_write_failures;
+            return Error{"persistence", persist_error->message +
+                                            " (the amend was accepted by the venue; "
+                                            "reconcile or an execution report converges it)"};
         }
-        append_event(amended_event(record));
+        // reports that raced the venue ack apply after the amended event
+        // exists, keeping the log replay-correct (amended -> state): the
+        // old leg contributes fills only, the new leg drives the state
+        // (an immediate full fill lands Filled, not a zombie Live).
+        for (const auto& entry : raced) {
+            apply_arbitrated_report(record, entry);
+        }
         return record;
     }
 }
@@ -660,7 +712,57 @@ void OrderManagementSystem::note_exchange_id(OrderRecord& a_record, const std::s
         return;
     }
     a_record.exchange_order_id = a_id;
-    a_record.exchange_order_ids.push_back(a_id);
+    // backfill/adoption path: the observed id is newest known truth
+    a_record.legs.push_back(
+        OrderLeg{.version = a_record.legs.size() + 1, .exchange_order_id = a_id});
+}
+
+void OrderManagementSystem::append_amend_leg(OrderRecord& a_record, const std::string& a_id)
+{
+    if (a_id.empty()) {
+        return; // defensive: an ack without an id leaves the leg table alone
+    }
+    // The amend ack always advances the version, even when the venue
+    // echoes the current id (in-place amend venues): the leg table is the
+    // amend ledger first, the id mapping second.
+    a_record.legs.push_back(
+        OrderLeg{.version = a_record.legs.size() + 1, .exchange_order_id = a_id});
+    a_record.exchange_order_id = a_id;
+}
+
+auto OrderManagementSystem::leg_index_of(const OrderRecord& a_record, const std::string& a_id) const
+    -> std::optional<std::size_t>
+{
+    std::optional<std::size_t> match;
+    for (std::size_t index = 0; index < a_record.legs.size(); ++index) {
+        if (a_record.legs[index].exchange_order_id == a_id) {
+            match = index; // keep scanning: the NEWEST matching leg wins
+        }
+    }
+    return match;
+}
+
+void OrderManagementSystem::note_discovered_leg(std::string a_client_order_id,
+                                                std::string a_exchange_order_id)
+{
+    constexpr std::size_t kMaxDiscoveredLegNotes = 256;
+    discovered_leg_notes_.emplace_back(std::move(a_client_order_id),
+                                       std::move(a_exchange_order_id));
+    while (discovered_leg_notes_.size() > kMaxDiscoveredLegNotes) {
+        discovered_leg_notes_.pop_front();
+    }
+}
+
+auto OrderManagementSystem::drain_raced_reports(const std::string& a_client_order_id)
+    -> std::vector<ExecutionReport>
+{
+    std::vector<ExecutionReport> raced;
+    if (const auto flying = raced_reports_.find(a_client_order_id);
+        flying != raced_reports_.end()) {
+        raced = std::move(flying->second);
+        raced_reports_.erase(flying);
+    }
+    return raced;
 }
 
 void OrderManagementSystem::apply_report(OrderRecord& a_record, const ExecutionReport& a_report,
@@ -681,15 +783,45 @@ void OrderManagementSystem::apply_report(OrderRecord& a_record, const ExecutionR
     }
 }
 
+void OrderManagementSystem::apply_arbitrated_report(OrderRecord& a_record,
+                                                    const ExecutionReport& a_report)
+{
+    // Venue-lifecycle arbitration by the leg table. cancelReplace venues
+    // (Binance) emit reports for BOTH legs of an amend under the same
+    // clientOrderId: the replaced order's CANCELED must not terminalize
+    // the live replacement. Rules (no report is ignored):
+    // - report id empty, current leg, or unknown to the table: full
+    //   lifecycle application (an unknown id means the venue knows a leg
+    //   we don't — a lost amend ack — and is adopted as the newest leg,
+    //   counted and surfaced by audit())
+    // - report id belongs to a superseded leg: fills still count (real
+    //   executions, monotonic high-water mark), state/price/quantity
+    //   do not
+    bool apply_lifecycle = true;
+    if (!a_report.exchange_order_id.empty() && !a_record.legs.empty()) {
+        const auto match = leg_index_of(a_record, a_report.exchange_order_id);
+        if (!match.has_value()) {
+            note_exchange_id(a_record, a_report.exchange_order_id);
+            ++stats_.legs_discovered;
+            note_discovered_leg(a_record.client_order_id, a_report.exchange_order_id);
+        } else if (*match + 1 < a_record.legs.size()) {
+            apply_lifecycle = false;
+        }
+    }
+    apply_report(a_record, a_report, apply_lifecycle);
+}
+
 void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
 {
     const std::lock_guard lock(mutex_);
-    // A place whose venue ack has not landed yet: buffer the report so it
-    // applies (and persists) right after the place outcome, in
-    // replay-correct order (place_submitted -> place_accepted -> state).
+    // A place or amend whose venue outcome has not landed yet: buffer the
+    // report so it applies (and persists) right after that outcome, in
+    // replay-correct order (place_submitted -> place_accepted -> state;
+    // amended -> state) and under the then-current leg table.
     if (const auto flying = raced_reports_.find(a_report.client_order_id);
         flying != raced_reports_.end()) {
         flying->second.push_back(a_report);
+        ++stats_.reports_buffered;
         return;
     }
     const auto it = lookup(a_report.client_order_id);
@@ -697,27 +829,7 @@ void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
         ++stats_.reports_unknown;
         return;
     }
-    OrderRecord& record = it->second;
-
-    // Venue-lifecycle arbitration by exchange order id. cancelReplace
-    // venues (Binance) emit reports for BOTH legs of an amend under the
-    // same clientOrderId: the replaced order's CANCELED must not
-    // terminalize the live replacement. Rules (no report is ignored):
-    // - report id empty, or equal to the current id, or never seen
-    //   before (the in-flight replacement racing its own amend ack):
-    //   full lifecycle application
-    // - report id is a KNOWN but superseded id (an old amend leg):
-    //   fills still count (real executions, monotonic high-water mark),
-    //   state/price/quantity do not
-    bool apply_lifecycle = true;
-    if (!a_report.exchange_order_id.empty() && !record.exchange_order_id.empty() &&
-        a_report.exchange_order_id != record.exchange_order_id) {
-        const auto& history = record.exchange_order_ids;
-        apply_lifecycle =
-            std::find(history.begin(), history.end(), a_report.exchange_order_id) == history.end();
-    }
-
-    apply_report(record, a_report, apply_lifecycle);
+    apply_arbitrated_report(it->second, a_report);
 }
 
 void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot,
@@ -733,14 +845,15 @@ void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot
                        .price = a_snapshot.price,
                        .quantity = a_snapshot.quantity,
                        .state = a_snapshot.state,
-                       .filled_quantity =
-                           a_snapshot.filled_quantity.empty() ? "0" : a_snapshot.filled_quantity,
-                       .average_fill_price = a_snapshot.average_fill_price,
-                       .exchange_order_ids = {},
-                       .adopted = a_adopted,
-                       .rejection = std::nullopt};
+                        .filled_quantity =
+                            a_snapshot.filled_quantity.empty() ? "0" : a_snapshot.filled_quantity,
+                        .average_fill_price = a_snapshot.average_fill_price,
+                        .legs = {},
+                        .adopted = a_adopted,
+                        .rejection = std::nullopt};
     if (!a_snapshot.exchange_order_id.empty()) {
-        record.exchange_order_ids = {a_snapshot.exchange_order_id};
+        record.legs.push_back(OrderLeg{.version = 1,
+                                       .exchange_order_id = a_snapshot.exchange_order_id});
     }
     if (a_adopted) {
         append_event(adopted_event(record));
@@ -838,6 +951,15 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
             if (record.exchange_order_id.empty() && !snapshot.value()->exchange_order_id.empty()) {
                 note_exchange_id(record, snapshot.value()->exchange_order_id);
                 changed = true;
+            } else if (!snapshot.value()->exchange_order_id.empty() &&
+                       !leg_index_of(record, snapshot.value()->exchange_order_id).has_value()) {
+                // The venue snapshot carries an id no leg knows: an amend
+                // whose ack never resolved (transport-unresolved). Adopt
+                // it as the newest leg so reports arbitrate correctly.
+                note_exchange_id(record, snapshot.value()->exchange_order_id);
+                ++stats_.legs_discovered;
+                note_discovered_leg(record.client_order_id, snapshot.value()->exchange_order_id);
+                changed = true;
             }
             if (apply_observation(record, snapshot.value()->state,
                                   snapshot.value()->filled_quantity,
@@ -896,6 +1018,13 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
     if (!type.has_value() || !client_order_id.has_value()) {
         return; // replay is schema-validated defensively: skip junk
     }
+    const auto event_version = [&a_event]() -> std::uint64_t {
+        const auto it = a_event.find("version");
+        if (it != a_event.end() && it->is_number_unsigned()) {
+            return it->get<std::uint64_t>();
+        }
+        return 0; // legacy event: no explicit version
+    }();
 
     if (*type == "place_submitted" || *type == "place_accepted" || *type == "adopted") {
         const auto symbol = event_string(a_event, "symbol").value_or("");
@@ -921,7 +1050,7 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
                            .state = OrderState::Live,
                            .filled_quantity = "0",
                            .average_fill_price = "",
-                           .exchange_order_ids = {},
+                           .legs = {},
                            .adopted = *type == "adopted",
                            .rejection = std::nullopt};
         if (*type == "place_submitted") {
@@ -932,7 +1061,8 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
             record.state = OrderState::Pending;
         }
         if (!exchange_order_id.empty()) {
-            record.exchange_order_ids = {exchange_order_id};
+            record.legs.push_back(OrderLeg{.version = event_version == 0 ? 1 : event_version,
+                                               .exchange_order_id = exchange_order_id});
         }
         if (*type == "adopted") {
             record.state = parse_state(event_string(a_event, "state").value_or("live"))
@@ -969,13 +1099,32 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         if (quantity.has_value() && !quantity->empty()) {
             it->second.quantity = *quantity;
         }
-        note_exchange_id(it->second, event_string(a_event, "exchangeOrderId").value_or(""));
-        // cancelReplace amends may follow a superseded leg's CANCELED
-        // state event with this one; the replacement is live
-        const auto state = parse_state(event_string(a_event, "state").value_or(""));
-        if (state.has_value() && it->second.state == OrderState::Canceled &&
-            *state == OrderState::Live) {
-            it->second.state = OrderState::Live;
+        const auto exchange_order_id = event_string(a_event, "exchangeOrderId").value_or("");
+        if (event_version == 0) {
+            // Legacy event (pre versioned legs): infer the append and
+            // keep the historic Canceled->Live resurrection — old logs
+            // contain the amend-race shape the runtime no longer writes.
+            note_exchange_id(it->second, exchange_order_id);
+            const auto state = parse_state(event_string(a_event, "state").value_or(""));
+            if (state.has_value() && it->second.state == OrderState::Canceled &&
+                *state == OrderState::Live) {
+                it->second.state = OrderState::Live;
+            }
+            return;
+        }
+        // Versioned replay: in-order logs append leg after leg; a repeat
+        // of a known version updates it (idempotent re-reads).
+        if (event_version <= it->second.legs.size()) {
+            auto& leg = it->second.legs[event_version - 1];
+            if (!exchange_order_id.empty()) {
+                leg.exchange_order_id = exchange_order_id;
+            }
+        } else {
+            it->second.legs.push_back(OrderLeg{.version = event_version,
+                                               .exchange_order_id = exchange_order_id});
+        }
+        if (!exchange_order_id.empty()) {
+            it->second.exchange_order_id = exchange_order_id;
         }
         return;
     }
@@ -999,6 +1148,177 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         }
         return;
     }
+}
+
+void OrderManagementSystem::audit_record_local(const OrderRecord& a_record,
+                                               std::vector<ConsistencyAlert>& a_alerts) const
+{
+    // Leg chain: versions must be a contiguous 1..N sequence.
+    for (std::size_t index = 0; index < a_record.legs.size(); ++index) {
+        if (a_record.legs[index].version != index + 1) {
+            a_alerts.push_back(ConsistencyAlert{
+                a_record.client_order_id,
+                "version_gap",
+                "leg " + std::to_string(index + 1) + " carries version " +
+                    std::to_string(a_record.legs[index].version) + "; expected a contiguous 1.." +
+                    std::to_string(a_record.legs.size()) + " chain"});
+            break;
+        }
+    }
+    if (!a_record.legs.empty() &&
+        a_record.legs.back().exchange_order_id != a_record.exchange_order_id) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "version_gap",
+            "current exchangeOrderId " + a_record.exchange_order_id + " != newest leg id " +
+                a_record.legs.back().exchange_order_id});
+    }
+
+    // Fill high-water mark vs lifecycle state.
+    const auto filled = parse_decimal(a_record.filled_quantity.empty() ? "0"
+                                                                       : a_record.filled_quantity);
+    const auto quantity = parse_decimal(a_record.quantity);
+    if (!filled.is_ok() || !quantity.is_ok() || is_zero(quantity.value())) {
+        return;
+    }
+    const auto relation = compare(filled.value(), quantity.value());
+    if (a_record.state != OrderState::Filled && relation >= 0) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "fill_state_mismatch",
+            "filledQuantity " + a_record.filled_quantity + " reached quantity " +
+                a_record.quantity + " but state is " + std::string{to_string(a_record.state)}});
+    } else if (a_record.state == OrderState::Filled && relation < 0) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "fill_state_mismatch",
+            "state is filled but filledQuantity " + a_record.filled_quantity +
+                " is below quantity " + a_record.quantity});
+    }
+}
+
+void OrderManagementSystem::audit_record_vs_snapshot(
+    const OrderRecord& a_record, const OrderSnapshot& a_snapshot,
+    std::vector<ConsistencyAlert>& a_alerts) const
+{
+    if (!a_snapshot.exchange_order_id.empty() &&
+        !leg_index_of(a_record, a_snapshot.exchange_order_id).has_value()) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "unknown_leg_report",
+            "venue snapshot carries exchangeOrderId " + a_snapshot.exchange_order_id +
+                " absent from the leg table (reconcile adopts it on the next pass)"});
+    }
+    if (a_snapshot.state != a_record.state) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "state_mismatch",
+            "local " + std::string{to_string(a_record.state)} + ", venue " +
+                std::string{to_string(a_snapshot.state)}});
+    }
+    const auto compare_decimal = [](const std::string& a_local, const std::string& a_venue)
+        -> std::optional<int> {
+        const auto local = parse_decimal(a_local.empty() ? "0" : a_local);
+        const auto venue = parse_decimal(a_venue.empty() ? "0" : a_venue);
+        if (!local.is_ok() || !venue.is_ok()) {
+            return std::nullopt; // unparseable values are not evidence of drift
+        }
+        return compare(local.value(), venue.value());
+    };
+    if (const auto relation = compare_decimal(a_record.filled_quantity,
+                                              a_snapshot.filled_quantity);
+        relation.has_value() && *relation != 0) {
+        a_alerts.push_back(ConsistencyAlert{
+            a_record.client_order_id,
+            "fill_mismatch",
+            "local filledQuantity " + a_record.filled_quantity + ", venue " +
+                a_snapshot.filled_quantity});
+    }
+    if (const auto relation = compare_decimal(a_record.price, a_snapshot.price);
+        relation.has_value() && *relation != 0) {
+        a_alerts.push_back(ConsistencyAlert{a_record.client_order_id, "price_qty_mismatch",
+                                            "local price " + a_record.price + ", venue " +
+                                                a_snapshot.price});
+    }
+    if (const auto relation = compare_decimal(a_record.quantity, a_snapshot.quantity);
+        relation.has_value() && *relation != 0) {
+        a_alerts.push_back(ConsistencyAlert{a_record.client_order_id, "price_qty_mismatch",
+                                            "local quantity " + a_record.quantity + ", venue " +
+                                                a_snapshot.quantity});
+    }
+}
+
+auto OrderManagementSystem::audit() -> AuditReport
+{
+    AuditReport report;
+
+    struct WorkItem
+    {
+        std::string id;
+        std::string venue;
+        OrderQuery query;
+    };
+    std::vector<WorkItem> open;
+
+    { // ---- local invariants + worklist snapshot under the lock ----
+        const std::lock_guard lock(mutex_);
+        report.orders_checked = orders_.size();
+        for (const auto& [id, record] : orders_) {
+            audit_record_local(record, report.alerts);
+            // ids with an open place/amend venue call own themselves: an
+            // in-flight amend's snapshot could legally differ from the
+            // not-yet-applied outcome
+            if (!is_terminal(record.state) && raced_reports_.find(id) == raced_reports_.end()) {
+                const std::string& venue = record.venue.empty() ? default_venue_ : record.venue;
+                open.push_back(WorkItem{id, venue, OrderQuery{id, record.symbol}});
+            }
+        }
+        for (const auto& [client_order_id, exchange_order_id] : discovered_leg_notes_) {
+            report.alerts.push_back(ConsistencyAlert{
+                client_order_id,
+                "unknown_leg_report",
+                "execution report carried exchangeOrderId " + exchange_order_id +
+                    " absent from the leg table; adopted as a new leg (lost amend ack?)"});
+        }
+        discovered_leg_notes_.clear();
+    }
+
+    // ---- venue truth per non-terminal order, lock only for comparing ----
+    for (const auto& item : open) {
+        const auto connector = connector_for(item.venue);
+        if (connector == nullptr) {
+            ++report.lookup_failures;
+            report.alerts.push_back(ConsistencyAlert{item.id, "lookup_failed",
+                                                     "no connector for venue \"" + item.venue +
+                                                         "\""});
+            continue;
+        }
+        const auto snapshot = connector->get_order(item.query);
+        ++report.venue_lookups;
+
+        const std::lock_guard lock(mutex_);
+        const auto it = lookup(item.id);
+        if (it == orders_.end()) {
+            continue; // removed while unlocked (nothing erases today; defensive)
+        }
+        if (!snapshot.is_ok()) {
+            ++report.lookup_failures;
+            report.alerts.push_back(ConsistencyAlert{
+                item.id, "lookup_failed",
+                snapshot.error().code + ": " + snapshot.error().message});
+            continue;
+        }
+        if (!snapshot.value().has_value()) {
+            report.alerts.push_back(ConsistencyAlert{
+                item.id,
+                "venue_unknown",
+                "non-terminal locally (" + std::string{to_string(it->second.state)} +
+                    ") but the venue does not know the order"});
+            continue;
+        }
+        audit_record_vs_snapshot(it->second, *snapshot.value(), report.alerts);
+    }
+    return report;
 }
 
 } // namespace gateway

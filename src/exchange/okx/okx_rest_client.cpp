@@ -49,6 +49,12 @@ auto parse_envelope(const std::string& a_body, const std::string& a_path) -> Res
             detail += " [" + string_field(front, "sCode").value_or("") + ": " +
                       string_field(front, "sMsg").value_or("") + "]";
         }
+        if (detail.empty()) {
+            // some envelopes carry only the top-level code (e.g. 59691
+            // quota exhaustion: msg "" and data []); never report an
+            // empty reason
+            detail = *code;
+        }
         return Error{"venue:" + *code, "OKX rejected " + a_path + ": " + detail};
     }
     if (!envelope.contains("data") || !envelope.at("data").is_array()) {

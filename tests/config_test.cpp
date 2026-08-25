@@ -155,6 +155,46 @@ TEST_CASE("load_config reports missing files as io errors")
     CHECK(result.error().code == "io");
 }
 
+TEST_CASE("load_config parses the audit interval with a 30s default")
+{
+    const TempConfigFile without{R"({"okx": {}})"};
+    const auto defaults = gateway::load_config(without.path());
+    REQUIRE(defaults.is_ok());
+    CHECK(defaults.value().audit_interval_ms == 30000);
+
+    const TempConfigFile zero{R"({"audit": {"intervalMs": 0}})"};
+    const auto disabled = gateway::load_config(zero.path());
+    REQUIRE(disabled.is_ok());
+    CHECK(disabled.value().audit_interval_ms == 0);
+
+    const TempConfigFile custom{R"({"audit": {"intervalMs": 5000}})"};
+    const auto parsed = gateway::load_config(custom.path());
+    REQUIRE(parsed.is_ok());
+    CHECK(parsed.value().audit_interval_ms == 5000);
+}
+
+TEST_CASE("load_config rejects malformed audit sections")
+{
+    const TempConfigFile missing{R"({"audit": {}})"};
+    const auto no_interval = gateway::load_config(missing.path());
+    REQUIRE_FALSE(no_interval.is_ok());
+    CHECK(no_interval.error().code == "protocol");
+
+    const TempConfigFile stringy{R"({"audit": {"intervalMs": "30000"}})"};
+    CHECK_FALSE(gateway::load_config(stringy.path()).is_ok());
+
+    const TempConfigFile negative{R"({"audit": {"intervalMs": -1}})"};
+    CHECK_FALSE(gateway::load_config(negative.path()).is_ok());
+
+    const TempConfigFile huge{R"({"audit": {"intervalMs": 86400001}})"};
+    const auto out_of_range = gateway::load_config(huge.path());
+    REQUIRE_FALSE(out_of_range.is_ok());
+    CHECK(out_of_range.error().code == "protocol");
+
+    const TempConfigFile not_object{R"({"audit": 30000})"};
+    CHECK_FALSE(gateway::load_config(not_object.path()).is_ok());
+}
+
 TEST_CASE("okx_config_from_json accepts a complete section")
 {
     const auto section = nlohmann::json::parse(R"({

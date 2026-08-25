@@ -607,7 +607,14 @@ class _ProxyRequest(BaseModel):
     body: str | None = None
 
 
-_PROXY_PATH_PREFIXES = ("/orders", "/price", "/risk", "/health", "/venue/okx/demo-adjust-balance")
+_PROXY_PATH_PREFIXES = (
+    "/orders",
+    "/price",
+    "/risk",
+    "/health",
+    "/consistency",
+    "/venue/okx/demo-adjust-balance",
+)
 
 
 @app.post("/api/proxy")
@@ -627,7 +634,8 @@ def proxy(req: _ProxyRequest) -> JSONResponse:
     if not path.startswith(_PROXY_PATH_PREFIXES):
         raise HTTPException(
             status_code=400,
-            detail="path must target /orders, /price, /risk, /health or /venue/okx/demo-adjust-balance",
+            detail="path must target /orders, /price, /risk, /health, /consistency"
+            " or /venue/okx/demo-adjust-balance",
         )
 
     data = None

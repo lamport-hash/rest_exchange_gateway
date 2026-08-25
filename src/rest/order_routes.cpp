@@ -356,7 +356,8 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
         const nlohmann::json body = {{"status", "ok"},
                                      {"knownOrders", stats.known_orders},
                                      {"reportsApplied", stats.reports_applied},
-                                     {"reportsStale", stats.reports_stale}};
+                                     {"reportsStale", stats.reports_stale},
+                                     {"reportsBuffered", stats.reports_buffered}};
         return json_response(200, body);
     });
 

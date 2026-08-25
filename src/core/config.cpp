@@ -3,12 +3,13 @@
 #include <fstream>
 
 namespace gateway {
-
 namespace {
+
 constexpr std::uint16_t kMinPort = 1;
 constexpr std::uint16_t kMaxPort = 65535;
-} // namespace
+constexpr std::uint64_t kMaxAuditIntervalMs = 86400000; // 24h
 
+} // namespace
 auto load_config(const std::filesystem::path& a_path) -> Result<GatewayConfig>
 {
     std::ifstream file(a_path);
@@ -76,6 +77,20 @@ auto load_config(const std::filesystem::path& a_path) -> Result<GatewayConfig>
             return Error{"protocol", "defaultVenue must be a string"};
         }
         config.default_venue = root.at("defaultVenue").get<std::string>();
+    }
+
+    if (root.contains("audit")) {
+        const auto& audit = root.at("audit");
+        if (!audit.is_object() || !audit.contains("intervalMs") ||
+            !audit.at("intervalMs").is_number_unsigned()) {
+            return Error{"protocol",
+                         "audit section must be an object with unsigned numeric \"intervalMs\""};
+        }
+        const auto interval = audit.at("intervalMs").get<std::uint64_t>();
+        if (interval > kMaxAuditIntervalMs) {
+            return Error{"protocol", "audit.intervalMs is out of range [0, 86400000]"};
+        }
+        config.audit_interval_ms = interval;
     }
 
     return config;

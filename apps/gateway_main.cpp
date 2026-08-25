@@ -7,6 +7,7 @@
 #include "exchange/okx/okx_connector.hpp"
 #include "exchange/okx/okx_rest_client.hpp"
 #include "gateway/exchange_connector.hpp"
+#include "rest/consistency_routes.hpp"
 #include "rest/okx_demo_routes.hpp"
 #include "rest/order_routes.hpp"
 #include "rest/risk_routes.hpp"
@@ -14,6 +15,7 @@
 #include <crow_all.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <iostream>
@@ -21,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -34,6 +37,36 @@ auto reconcile_summary_line(const gateway::ReconcileReport& a_report) -> nlohman
             {"absentRejected", a_report.absent_rejected},
             {"unresolved", a_report.unresolved},
             {"pendingListingFailed", a_report.pending_listing_failed}};
+}
+
+auto consistency_alert_line(const gateway::ConsistencyAlert& a_alert) -> nlohmann::json
+{
+    return {{"ts", gateway::utc_now_iso_ms()},
+            {"event", "consistency_alert"},
+            {"clientOrderId", a_alert.client_order_id},
+            {"check", a_alert.check},
+            {"detail", a_alert.detail}};
+}
+
+/// Snapshot served by GET /consistency: the full alerts of the pass plus
+/// its counters. totalAlerts accumulates across passes so a burst between
+/// polls is still visible.
+auto consistency_snapshot(const gateway::AuditReport& a_report, std::uint64_t a_total_alerts)
+    -> nlohmann::json
+{
+    nlohmann::json alerts = nlohmann::json::array();
+    for (const auto& alert : a_report.alerts) {
+        alerts.push_back({{"clientOrderId", alert.client_order_id},
+                          {"check", alert.check},
+                          {"detail", alert.detail}});
+    }
+    return {{"ts", gateway::utc_now_iso_ms()},
+            {"status", "ok"},
+            {"ordersChecked", a_report.orders_checked},
+            {"venueLookups", a_report.venue_lookups},
+            {"lookupFailures", a_report.lookup_failures},
+            {"alerts", std::move(alerts)},
+            {"totalAlerts", a_total_alerts}};
 }
 
 } // namespace
@@ -170,8 +203,10 @@ auto main(int a_argc, char* a_argv[]) -> int
     }
 
     crow::SimpleApp app;
+    gateway::rest::ConsistencyCache consistency_cache;
     gateway::rest::register_order_routes(app, oms);
     gateway::rest::register_risk_routes(app, oms);
+    gateway::rest::register_consistency_routes(app, consistency_cache);
     if (okx_connector.has_value()) {
         // OKX-only demo-trading surface; absent when OKX is not configured.
         gateway::rest::register_okx_demo_routes(app, okx_connector.value());
@@ -186,6 +221,46 @@ auto main(int a_argc, char* a_argv[]) -> int
     }
     const auto startup_reconcile = oms.reconcile();
     std::cout << reconcile_summary_line(startup_reconcile).dump() << '\n' << std::flush;
+
+    // ---- periodic consistency audit (alert-only, never repairs) ----
+    // One pass immediately after the startup reconcile (so /consistency
+    // serves real data at once), then every audit.intervalMs. Venue I/O
+    // runs on this dedicated thread; REST handlers stay lock-free of it.
+    std::uint64_t total_consistency_alerts = 0;
+    const auto run_audit = [&oms, &consistency_cache, &total_consistency_alerts]() {
+        const auto report = oms.audit();
+        total_consistency_alerts += report.alerts.size();
+        for (const auto& alert : report.alerts) {
+            std::cout << consistency_alert_line(alert).dump() << '\n' << std::flush;
+        }
+        std::cout << nlohmann::json{{"ts", gateway::utc_now_iso_ms()},
+                                    {"event", "audit"},
+                                    {"ordersChecked", report.orders_checked},
+                                    {"venueLookups", report.venue_lookups},
+                                    {"lookupFailures", report.lookup_failures},
+                                    {"alerts", report.alerts.size()}}
+                         .dump()
+                  << '\n'
+                  << std::flush;
+        consistency_cache.store(consistency_snapshot(report, total_consistency_alerts));
+    };
+    std::optional<std::jthread> audit_scheduler;
+    if (config.value().audit_interval_ms > 0) {
+        run_audit();
+        audit_scheduler.emplace(
+            [interval = std::chrono::milliseconds{config.value().audit_interval_ms}, &run_audit](
+                std::stop_token a_stop) {
+                auto next_run = std::chrono::steady_clock::now() + interval;
+                while (!a_stop.stop_requested()) {
+                    if (std::chrono::steady_clock::now() < next_run) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds{200});
+                        continue;
+                    }
+                    run_audit();
+                    next_run = std::chrono::steady_clock::now() + interval;
+                }
+            });
+    }
 
     std::string venue_names;
     for (const auto& venue : oms.venues()) {

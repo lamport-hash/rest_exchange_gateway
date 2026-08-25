@@ -83,6 +83,9 @@ config/*.local.json
 # edge allowlist (never commit)
 .env
 
+# opencode session/plugin data
+.opencode/
+
 
 # runtime gateway output (default persistence path)
 data/

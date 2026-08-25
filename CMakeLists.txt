@@ -92,6 +92,7 @@ add_library(gateway_rest STATIC
     src/rest/order_routes.cpp
     src/rest/okx_demo_routes.cpp
     src/rest/risk_routes.cpp
+    src/rest/consistency_routes.cpp
 )
 target_link_libraries(gateway_rest PUBLIC gateway_core gateway_okx)
 
