@@ -307,6 +307,91 @@ TEST_CASE("wrong credentials keep the feed retrying without Connected")
     feed.stop();
 }
 
+TEST_CASE("a type-confused login ack fails the session instead of crashing")
+{
+    // Regression: a numeric "code" in the login ack used to throw
+    // json::type_error.302 out of the supervisor jthread, terminating the
+    // process. It must instead fail the session (Disconnected) and keep
+    // reconnecting; the next, well-formed login succeeds.
+    OkxMockWsServer server(base_config());
+    server.start();
+    OkxOrdersFeed feed{feed_config(server, base_config())};
+    EventLog events;
+    feed.set_event_handler([&events](const FeedEvent& a_event) { events.record(a_event); });
+    feed.start();
+
+    server.set_raw_login_ack(R"({"event":"login","code":0,"msg":""})");
+    REQUIRE(events.wait_for_count(FeedEventType::Disconnected, 1, 5000));
+    CHECK(events.count(FeedEventType::Connected) == 0);
+
+    // the supervisor survived: the next login+subscribe succeeds
+    REQUIRE(server.wait_for_connections(2, 5000));
+    CHECK(events.wait_for_count(FeedEventType::Connected, 1, 5000));
+
+    feed.stop();
+}
+
+TEST_CASE("a type-confused subscribe ack fails the session instead of crashing")
+{
+    // Regression: a numeric "event" in the subscribe ack used to throw
+    // json::type_error.302 out of the supervisor jthread (terminate).
+    OkxMockWsServer server(base_config());
+    server.start();
+    OkxOrdersFeed feed{feed_config(server, base_config())};
+    EventLog events;
+    feed.set_event_handler([&events](const FeedEvent& a_event) { events.record(a_event); });
+    feed.start();
+
+    server.set_raw_subscribe_ack(R"({"event":5,"code":"0"})");
+    REQUIRE(events.wait_for_count(FeedEventType::Disconnected, 1, 5000));
+    CHECK(events.count(FeedEventType::Connected) == 0);
+
+    REQUIRE(server.wait_for_connections(2, 5000));
+    CHECK(events.wait_for_count(FeedEventType::Connected, 1, 5000));
+
+    feed.stop();
+}
+
+TEST_CASE("a healthy session resets the reconnect backoff")
+{
+    // Regression: connect_attempt was monotone, so failures accumulated
+    // during an early outage pinned every later reconnect near max
+    // backoff. After a session has been subscribed and seen inbound
+    // traffic (pongs count), the next failure must start at the initial
+    // backoff again.
+    OkxMockWsServer server(base_config());
+    server.start();
+    auto config = feed_config(server, base_config());
+    config.retry.initial_backoff = std::chrono::milliseconds{100};
+    config.retry.max_backoff = std::chrono::milliseconds{60000};
+    config.retry.jitter = 0.0;
+
+    EventLog events;
+    OkxOrdersFeed feed{config};
+    feed.set_event_handler([&events](const FeedEvent& a_event) { events.record(a_event); });
+
+    // outage: six failed connect attempts accumulate backoff (without the
+    // fix the next delay after the healthy session would be >= 6.4s)
+    server.stop();
+    feed.start();
+    REQUIRE(events.wait_for_count(FeedEventType::Connecting, 6, 15000));
+
+    // venue returns; the session subscribes and the app-level pinger's
+    // pong arrives within one ping interval (60ms): healthy
+    server.restart_on_same_port();
+    REQUIRE(events.wait_for_count(FeedEventType::Connected, 1, 15000));
+    REQUIRE(server.wait_for_text("ping", 5000));
+
+    server.kill_connections();
+    REQUIRE(events.wait_for_count(FeedEventType::Disconnected, 1, 5000));
+
+    // healthy session -> the next backoff is the initial one (~200ms),
+    // not the accumulated one (>= 6.4s)
+    REQUIRE(events.wait_for_count(FeedEventType::Connected, 2, 5000));
+
+    feed.stop();
+}
+
 TEST_CASE("duplicate and out-of-order updates are forwarded verbatim")
 {
     OkxMockWsServer server(base_config());

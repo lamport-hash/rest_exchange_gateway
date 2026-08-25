@@ -17,6 +17,10 @@ namespace gateway::exchange::binance {
 
 namespace {
 
+/// A subscribed session alive at least this long counts as healthy even
+/// without served requests (quiet but functional link).
+constexpr auto kHealthySessionSeconds = std::chrono::seconds{30};
+
 /// Wait for a_duration, but wake up as soon as a_stop is requested.
 void interruptible_sleep(std::chrono::milliseconds a_duration, std::stop_token a_stop)
 {
@@ -45,6 +49,23 @@ auto average_price(const std::string& a_quote_qty, const std::string& a_filled) 
         return {};
     }
     return decimal_to_string(price.value());
+}
+
+/// True when a result is the venue's -1021 (timestamp outside the
+/// recvWindow): the local clock disagrees with the venue clock.
+auto is_clock_skew_reject(const Result<nlohmann::json>& a_result) -> bool
+{
+    return !a_result.is_ok() && a_result.error().code == "venue:-1021";
+}
+
+/// Integer serverTime out of a "time" method RESULT payload.
+auto server_time_of(const nlohmann::json& a_result) -> std::optional<long long>
+{
+    const auto server_time = a_result.find("serverTime");
+    if (server_time == a_result.end() || !server_time->is_number_integer()) {
+        return std::nullopt;
+    }
+    return server_time->get<long long>();
 }
 
 } // namespace
@@ -229,6 +250,15 @@ auto BinanceWsClient::call(const std::string& a_method,
         code = std::to_string(error->value("code", 0));
         message = error->value("msg", message);
     }
+    // -1006 (UNEXPECTED_RESP) / -1007 (TIMEOUT): per the docs the request
+    // may still have been executed — the outcome is unknown, exactly like
+    // a 5xx or a dropped response. Map to "transport" regardless of the
+    // HTTP status so resolve-then-retry runs (order.status before any
+    // re-send) instead of a definitive, possibly false rejection.
+    if (code == "-1006" || code == "-1007") {
+        return Error{"transport", "venue error " + code + " (" + message +
+                                      ", outcome unknown, resolve before retry)"};
+    }
     return Error{"venue:" + code, message};
 }
 
@@ -236,11 +266,81 @@ auto BinanceWsClient::call_signed(const std::string& a_method,
                                   const nlohmann::json& a_params) -> Result<nlohmann::json>
 {
     nlohmann::json signed_params = a_params;
-    signed_params["apiKey"] = config_.api_key;
-    signed_params["recvWindow"] = config_.recv_window_ms;
-    signed_params["timestamp"] = timestamp_();
-    signed_params["signature"] = sign_params(signed_params, config_.secret_key);
-    return call(a_method, signed_params);
+    apply_signature(signed_params);
+    auto result = call(a_method, signed_params);
+    if (!is_clock_skew_reject(result)) {
+        return result;
+    }
+    // -1021: sync the venue clock and re-sign the SAME request once. A
+    // -1021 rejection happens before execution, so re-signing can never
+    // duplicate an order (unlike a blind re-send, which could).
+    const auto synced = sync_server_time();
+    if (!synced.is_ok()) {
+        return result; // keep the definitive venue:-1021 error
+    }
+    apply_signature(signed_params); // re-sign with the fresh offset
+    result = call(a_method, signed_params);
+    if (is_clock_skew_reject(result)) {
+        return Error{"protocol",
+                     "clock skew unrecoverable: -1021 persists after time sync and one re-sign"};
+    }
+    return result;
+}
+
+void BinanceWsClient::apply_signature(nlohmann::json& a_params) const
+{
+    a_params["apiKey"] = config_.api_key;
+    a_params["recvWindow"] = config_.recv_window_ms;
+    a_params["timestamp"] =
+        timestamp_() + server_time_offset_ms_.load(std::memory_order_relaxed);
+    a_params.erase("signature"); // never sign the signature itself
+    a_params["signature"] = sign_params(a_params, config_.secret_key);
+}
+
+auto BinanceWsClient::sync_server_time() -> Result<long long>
+{
+    const auto result = call("time", nlohmann::json::object());
+    if (!result.is_ok()) {
+        return result.error();
+    }
+    const auto server_time = server_time_of(result.value());
+    if (!server_time.has_value()) {
+        return Error{"protocol", "time response without integer serverTime: " +
+                                     result.value().dump()};
+    }
+    const long long offset = *server_time - timestamp_();
+    server_time_offset_ms_.store(offset, std::memory_order_relaxed);
+    return offset;
+}
+
+auto BinanceWsClient::inline_time_sync() -> bool
+{
+    const long long id = [this] {
+        const std::lock_guard lock(pending_mutex_);
+        return next_id_++;
+    }();
+    const nlohmann::json frame{{"id", id}, {"method", "time"}, {"params", nlohmann::json::object()}};
+    if (!client_->send(frame.dump())) {
+        return false;
+    }
+    std::string message;
+    if (client_->read(message) != httplib::ws::ReadResult::Text) {
+        return false;
+    }
+    const auto parsed = nlohmann::json::parse(message, nullptr, false);
+    const auto response_id = parsed.find("id");
+    const auto result = parsed.find("result");
+    if (parsed.is_discarded() || response_id == parsed.end() ||
+        !response_id->is_number_integer() || response_id->get<long long>() != id ||
+        result == parsed.end() || !result->is_object()) {
+        return false;
+    }
+    const auto server_time = server_time_of(*result);
+    if (!server_time.has_value()) {
+        return false;
+    }
+    server_time_offset_ms_.store(*server_time - timestamp_(), std::memory_order_relaxed);
+    return true;
 }
 
 void BinanceWsClient::fail_all_pending()
@@ -315,12 +415,12 @@ void BinanceWsClient::handle_user_event(const nlohmann::json& a_event)
     }
 }
 
-void BinanceWsClient::dispatch_message(const std::string& a_message)
+auto BinanceWsClient::dispatch_message(const std::string& a_message) -> bool
 {
     const auto parsed = nlohmann::json::parse(a_message, nullptr, false);
     if (parsed.is_discarded() || !parsed.is_object()) {
         emit(BinanceFeedEventType::ProtocolWarning, "non-JSON text frame skipped");
-        return;
+        return false;
     }
 
     const auto event = parsed.find("event");
@@ -328,14 +428,14 @@ void BinanceWsClient::dispatch_message(const std::string& a_message)
         const std::string type = event->value("e", std::string{});
         if (type == "serverShutdown") {
             terminate_reason_ = "venue announced serverShutdown";
-            return;
+            return false;
         }
         if (type == "eventStreamTerminated") {
             terminate_reason_ = "venue terminated the user data stream";
-            return;
+            return false;
         }
         handle_user_event(*event);
-        return;
+        return false;
     }
 
     const auto id = parsed.find("id");
@@ -354,16 +454,18 @@ void BinanceWsClient::dispatch_message(const std::string& a_message)
             const std::lock_guard lock(pending->mutex);
             pending->response = parsed;
             pending->cv.notify_all();
+            return true;
         }
         // Unknown ids (late responses to requests that already timed out)
         // are dropped: the caller already moved on to resolution.
-        return;
+        return false;
     }
 
     emit(BinanceFeedEventType::ProtocolWarning, "unrecognized venue frame skipped: " + a_message);
+    return false;
 }
 
-auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
+auto BinanceWsClient::run_session(std::stop_token a_stop) -> SessionOutcome
 {
     const std::string url = (config_.use_tls ? "wss://" : "ws://") + config_.host + ":" +
                             std::to_string(config_.port) + config_.path;
@@ -373,24 +475,47 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
     auto client = std::make_unique<httplib::ws::WebSocketClient>(url);
     client->set_connection_timeout(
         std::chrono::duration_cast<std::chrono::milliseconds>(config_.request_timeout) / 4);
-    // Keep the WS-layer heartbeat: Binance answers protocol pongs and the
-    // server's own pings are auto-answered by the read loop.
+    // Protocol-level liveness: pings on this same connection; after
+    // ws_max_missed_pongs unanswered ones the watchdog closes the silent
+    // socket (half-open detection), which unblocks the read loop and runs
+    // the normal reconnect + re-subscribe path. httplib's default (0
+    // missed pongs) disables the check entirely, leaving a silent socket
+    // undetected until the 300s OS read timeout.
+    client->set_websocket_ping_interval(config_.ws_ping_interval_s);
+    client->set_websocket_max_missed_pongs(config_.ws_max_missed_pongs);
+    // Bound the blocked read: the watchdog flips the WebSocket state, but
+    // a fully silent wire never delivers the bytes that would unblock
+    // recv() (the close frame may be held by a dead path forever). A read
+    // deadline slightly beyond the watchdog window guarantees the read
+    // loop observes the death. Healthy links reset the deadline
+    // continuously (venue pings, pongs to our pings, events), so only
+    // true silence ever trips it.
+    client->set_read_timeout(static_cast<time_t>(config_.ws_ping_interval_s) *
+                                     (config_.ws_max_missed_pongs + 1) +
+                                 config_.ws_ping_interval_s,
+                             0);
 
     {
         const std::lock_guard lock(client_mutex_);
         client_ = std::move(client);
     }
 
-    const std::string failure = [this, &a_stop, &url]() -> std::string {
+    const SessionOutcome outcome = [this, &a_stop, &url]() -> SessionOutcome {
         const auto connected = client_->connect();
         if (!connected) {
-            return "connect failed to " + url + ": error " +
-                   std::to_string(static_cast<int>(connected.error()));
+            return SessionOutcome{.failure = "connect failed to " + url + ": error " +
+                                                 std::to_string(static_cast<int>(
+                                                     connected.error()))};
         }
 
         // ---- subscribe the account's User Data Stream on this session ----
-        nlohmann::json params{{"apiKey", config_.api_key}, {"timestamp", timestamp_()}};
-        params["signature"] = sign_params(params, config_.secret_key);
+        // Best-effort clock sync first: with a drifted local clock the
+        // SIGNED subscribe below would be rejected -1021 on every
+        // attempt, dead-looping reconnects. The learned offset is reused
+        // by every subsequent signed call (and refreshed on -1021).
+        (void)inline_time_sync();
+        nlohmann::json params = nlohmann::json::object();
+        apply_signature(params);
         const long long subscribe_id = [this] {
             const std::lock_guard lock(pending_mutex_);
             return next_id_++;
@@ -406,11 +531,13 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
         if (!client_->send(subscribe_frame.dump())) {
             const std::lock_guard lock(pending_mutex_);
             pending_.erase(subscribe_id);
-            return "failed to send user data stream subscription";
+            return SessionOutcome{.failure = "failed to send user data stream subscription"};
         }
 
         // ---- read loop: responses, events, and the subscribe outcome ----
         bool subscribed = false;
+        bool served_after_subscribe = false;
+        auto subscribed_at = std::chrono::steady_clock::now();
         std::string reason;
         while (!a_stop.stop_requested()) {
             std::string message;
@@ -418,7 +545,7 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
                 reason = a_stop.stop_requested() ? std::string{} : std::string{"connection lost"};
                 break;
             }
-            dispatch_message(message);
+            const bool served_response = dispatch_message(message);
             if (!terminate_reason_.empty()) {
                 reason = terminate_reason_;
                 break;
@@ -431,10 +558,12 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
                     const int status = response.value("status", 0);
                     if (status == 200) {
                         subscribed = true;
+                        subscribed_at = std::chrono::steady_clock::now();
                         emit(BinanceFeedEventType::Connected,
                              "user data stream subscribed (subscriptionId " +
-                                 std::to_string(response.value("result", nlohmann::json::object())
-                                                    .value("subscriptionId", 0LL)) +
+                                 std::to_string(
+                                     response.value("result", nlohmann::json::object())
+                                         .value("subscriptionId", 0LL)) +
                                  ")");
                     } else {
                         reason = "user data stream subscription rejected: " + response.dump();
@@ -444,13 +573,20 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
                     reason = "connection lost during user data stream subscription";
                     break;
                 }
+            } else if (served_response) {
+                served_after_subscribe = true;
             }
         }
         {
             const std::lock_guard lock(pending_mutex_);
             pending_.erase(subscribe_id);
         }
-        return reason;
+        return SessionOutcome{
+            .failure = reason,
+            .healthy = subscribed &&
+                       (served_after_subscribe ||
+                        std::chrono::steady_clock::now() - subscribed_at >=
+                            kHealthySessionSeconds)};
     }();
 
     {
@@ -461,19 +597,25 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> std::string
         }
     }
     fail_all_pending();
-    return failure;
+    return outcome;
 }
 
 void BinanceWsClient::run(std::stop_token a_stop)
 {
     unsigned connect_attempt = 0;
     while (!a_stop.stop_requested()) {
-        const std::string failure = run_session(a_stop);
+        const SessionOutcome outcome = run_session(a_stop);
         if (a_stop.stop_requested()) {
             break;
         }
+        if (outcome.healthy) {
+            // the venue was reachable and responsive this session: the
+            // next failure is a fresh incident, not the tail of the last
+            // one — start the backoff over instead of climbing to max
+            connect_attempt = 0;
+        }
         ++connect_attempt;
-        emit(BinanceFeedEventType::Disconnected, failure);
+        emit(BinanceFeedEventType::Disconnected, outcome.failure);
 
         static thread_local std::mt19937_64 engine{std::random_device{}()};
         std::uniform_real_distribution<double> uniform{0.0, 1.0};

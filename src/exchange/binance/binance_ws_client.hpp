@@ -59,10 +59,14 @@ using UnixMsProvider = std::function<long long()>;
 ///   executionReport events arrive as {"subscriptionId", "event": {...}}
 ///   frames interleaved with request responses
 /// - server pings every ~20s are answered by the WS layer automatically;
-///   the client's own protocol heartbeat catches silent connections
+///   the client's own protocol heartbeat (wsPingIntervalSec /
+///   wsMaxMissedPongs) closes a silent connection after too many missed
+///   pongs so a half-open socket cannot stall trading for minutes
 /// - on disconnect: pending requests fail with "transport" (outcome
 ///   unknown), the supervisor reconnects with backoff + jitter and
-///   re-subscribes the User Data Stream
+///   re-subscribes the User Data Stream; the backoff resets to the
+///   initial value after every healthy session (the venue was proven
+///   reachable, so one early failure must not pin it at max backoff)
 ///
 /// Threading: call() may be invoked from any thread (one request frame per
 /// call, sends serialized); feed events are delivered on a dedicated
@@ -102,13 +106,20 @@ class BinanceWsClient final
     ///   session died mid-request (outcome unknown — resolve before retry)
     /// - "venue:<code>": definitive 4xx rejection (error.code)
     /// - "protocol": malformed response frame
-    /// - 5xx responses are returned as "transport": the venue documents
-    ///   that execution status is then unknown, not failed.
+    /// - 5xx responses and venue errors -1006/-1007 are returned as
+    ///   "transport": the venue documents that execution status is then
+    ///   unknown, not failed.
     [[nodiscard]] auto call(const std::string& a_method,
                             const nlohmann::json& a_params) -> Result<nlohmann::json>;
 
     /// SIGNED variant: adds apiKey/recvWindow/timestamp and the HMAC
     /// signature to a_params before sending (SIGNED request security).
+    /// On venue:-1021 (timestamp outside recvWindow) it syncs the venue
+    /// clock once via the public "time" method, stores the offset and
+    /// re-signs the SAME request once (a -1021 reject happens before
+    /// execution, so a re-sign can never duplicate an order; a re-send
+    /// could). A -1021 persisting after the re-sign is returned as
+    /// "protocol" (skew unrecoverable).
     [[nodiscard]] auto call_signed(const std::string& a_method,
                                    const nlohmann::json& a_params) -> Result<nlohmann::json>;
 
@@ -121,22 +132,52 @@ class BinanceWsClient final
         bool failed = false;                    // session died / send failed
     };
 
+    /// Result of one connect -> subscribe -> read cycle.
+    struct SessionOutcome
+    {
+        /// Why the session ended (empty when stopped by the caller).
+        std::string failure;
+        /// Subscribed AND proven alive (a response served after the
+        /// subscribe, or a subscribed uptime >= 30s). A healthy session
+        /// resets the reconnect backoff: the venue was reachable, so the
+        /// next failure should start at initialBackoffMs again.
+        bool healthy = false;
+    };
+
     void emit(BinanceFeedEventType a_type, std::string a_detail);
     void run(std::stop_token a_stop);
     /// Deliver queued feed events to the handler (never blocks the
     /// reader loop; see the threading note above).
     void pump_events(std::stop_token a_stop);
-    /// One connect -> subscribe -> read cycle. Returns the failure reason
-    /// that ended the session (empty when stopped by the caller).
-    [[nodiscard]] auto run_session(std::stop_token a_stop) -> std::string;
+    /// One connect -> subscribe -> read cycle.
+    [[nodiscard]] auto run_session(std::stop_token a_stop) -> SessionOutcome;
 
     /// Send a frame on the active session. False when there is no session
     /// or the send failed.
     [[nodiscard]] auto send_frame(const std::string& a_frame) -> bool;
 
-    /// Route one decoded response/event frame. Returns false when the
-    /// frame was not JSON or not an object (protocol warning emitted).
-    void dispatch_message(const std::string& a_message);
+    /// Route one decoded response/event frame. Returns true when the
+    /// frame completed a pending request response (session-liveness
+    /// signal for the reconnect backoff reset).
+    [[nodiscard]] auto dispatch_message(const std::string& a_message) -> bool;
+
+    /// Stamp apiKey/recvWindow/timestamp (shifted by the learned
+    /// venue-clock offset) and the HMAC signature onto a_params. Erases
+    /// any previous signature first, so re-signing the same object is
+    /// safe.
+    void apply_signature(nlohmann::json& a_params) const;
+
+    /// Sync the venue clock via the public "time" method from a caller
+    /// thread (response dispatched by the read loop). Stores the
+    /// serverTime - localTime offset for subsequent signatures.
+    [[nodiscard]] auto sync_server_time() -> Result<long long>;
+
+    /// Best-effort clock sync executed on the session thread before the
+    /// user data stream subscribe: sends a "time" request and reads the
+    /// reply inline (the read loop has not started yet). False when the
+    /// venue did not answer usable serverTime; the session proceeds with
+    /// whatever offset is already stored.
+    [[nodiscard]] auto inline_time_sync() -> bool;
 
     /// Complete/fail every pending request (session ended).
     void fail_all_pending();
@@ -150,6 +191,12 @@ class BinanceWsClient final
 
     BinanceConfig config_;
     UnixMsProvider timestamp_;
+
+    /// serverTime - localTime offset (ms), learned from the venue "time"
+    /// method on -1021 recovery and at session start. Atomic because
+    /// call_signed runs on arbitrary caller threads while the session
+    /// thread may refresh it.
+    std::atomic<long long> server_time_offset_ms_{0};
 
     ReportHandler report_handler_;
     EventHandler event_handler_;

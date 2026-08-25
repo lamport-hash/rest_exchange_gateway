@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <functional>
 #include <optional>
 #include <string>
@@ -33,6 +35,26 @@ inline auto value_matches(const std::string& a_requested, const std::string& a_r
     const auto lhs = parse_decimal(a_requested);
     const auto rhs = parse_decimal(a_reported);
     return lhs.is_ok() && rhs.is_ok() && compare(lhs.value(), rhs.value()) == 0;
+}
+
+/// True when a place rejection means "this clientOrderId already has an
+/// order". -4116 is one spelling, but live venues also surface duplicates
+/// as -2010 (order-create rejected) or an undocumented code whose message
+/// says duplicate / already exists. Each trigger resolves via
+/// order.status instead of a definitive rejection (which could falsely
+/// reject an order that actually landed).
+inline auto is_duplicate_reject(const Error& a_error) -> bool
+{
+    if (a_error.code == "venue:-4116" || a_error.code == "venue:-2010") {
+        return true;
+    }
+    std::string lower;
+    lower.reserve(a_error.message.size());
+    std::transform(a_error.message.begin(), a_error.message.end(),
+                   std::back_inserter(lower),
+                   [](unsigned char a_ch) { return static_cast<char>(std::tolower(a_ch)); });
+    return lower.find("duplicat") != std::string::npos ||
+           lower.find("already exist") != std::string::npos;
 }
 
 } // namespace detail
@@ -140,8 +162,9 @@ template <typename ApiT>
 /// - transport failure (outcome unknown): resolve via order.status; found
 ///   -> synthesized ack (no re-send); conclusively absent -> identical
 ///   re-send; unresolved -> "transport" without re-send (no double-place)
-/// - venue:-4116 (duplicate clientOrderId, e.g. an earlier unresolved
-///   place actually landed): resolve and return the existing order's ack
+/// - duplicate clientOrderId rejection (-4116, -2010 or a message saying
+///   duplicate/already-exists; e.g. an earlier unresolved place actually
+///   landed): resolve and return the existing order's ack
 /// - other venue/protocol errors are definitive and returned unchanged.
 template <typename ApiT>
 [[nodiscard]] auto binance_resilient_place(ApiT& a_api, const BinancePlaceRequest& a_request,
@@ -158,7 +181,8 @@ template <typename ApiT>
             return result;
         }
         const auto& error = result.error();
-        if (error.code == "transport" || error.code == "venue:-4116") {
+        const bool duplicate = detail::is_duplicate_reject(error);
+        if (error.code == "transport" || duplicate) {
             const auto lookup = binance_lookup(a_api, query, a_policy, a_clock);
             if (lookup.outcome == BinanceLookupOutcome::Found) {
                 return BinanceOrderAck{.order_id = lookup.info.order_id,
@@ -166,7 +190,7 @@ template <typename ApiT>
                                        .status = lookup.info.status,
                                        .executed_qty = lookup.info.executed_qty};
             }
-            if (error.code == "venue:-4116") {
+            if (duplicate) {
                 // Definitively absent duplicate: a genuine venue problem.
                 return result;
             }

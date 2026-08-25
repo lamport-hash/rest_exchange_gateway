@@ -193,6 +193,24 @@ void BinanceMockWsServer::set_drop_next_response()
     drop_next_response_ = true;
 }
 
+void BinanceMockWsServer::set_next_place_unknown_outcome(int a_code)
+{
+    const std::lock_guard lock(mutex_);
+    unknown_outcome_code_ = a_code;
+}
+
+void BinanceMockWsServer::set_next_duplicate_error_code(int a_code)
+{
+    const std::lock_guard lock(mutex_);
+    duplicate_error_code_ = a_code;
+}
+
+void BinanceMockWsServer::set_time_offset(long long a_offset_ms)
+{
+    const std::lock_guard lock(mutex_);
+    time_offset_ms_ = a_offset_ms;
+}
+
 void BinanceMockWsServer::set_delay_next_response(unsigned a_ms)
 {
     const std::lock_guard lock(mutex_);
@@ -463,8 +481,17 @@ auto BinanceMockWsServer::handle_place(const nlohmann::json& a_params) -> nlohma
     if (const MockOrder* existing = find_order(order.client_order_id);
         existing != nullptr && existing->status != "FILLED" && existing->status != "CANCELED") {
         // like the venue: a duplicate clientOrderId is rejected while the
-        // previous order is still open
-        return error_body(-4116, "ClientOrderId is duplicated.");
+        // previous order is still open. Live venues surface this under
+        // different codes, so tests may script one.
+        int code = -4116;
+        std::string msg = "ClientOrderId is duplicated.";
+        if (duplicate_error_code_ != 0) {
+            code = duplicate_error_code_;
+            msg = code == -2010 ? "Order would immediately match and take."
+                                : "ClientOrderId is duplicated.";
+            duplicate_error_code_ = 0;
+        }
+        return error_body(code, msg);
     }
 
     order.order_id = next_order_id();
@@ -567,9 +594,9 @@ void BinanceMockWsServer::handle_frame(httplib::ws::WebSocket& a_ws, Session& a_
 
     // userDataStream.subscribe.signature is SIGNED too (apiKey/timestamp/
     // signature params), so it runs through the same auth check.
-    // "ticker.price" is a NONE-security (public) market-data method: it
-    // must go out unsigned and is served without the SIGNED check.
-    const bool is_public_method = (method == "ticker.price");
+    // "ticker.price" and "time" are NONE-security (public) methods: they
+    // must go out unsigned and are served without the SIGNED check.
+    const bool is_public_method = (method == "ticker.price" || method == "time");
     if (!is_public_method) {
         if (auto auth_error = check_signed(params)) {
             const auto separator = auth_error->find(':');
@@ -600,12 +627,28 @@ void BinanceMockWsServer::handle_frame(httplib::ws::WebSocket& a_ws, Session& a_
                     ? error_response(a_request, 400, -1121, "Invalid symbol.")
                     : ok_response(a_request, nlohmann::json{{"symbol", ticker_symbol_},
                                                             {"price", ticker_price_}});
+    } else if (method == "time") {
+        const std::lock_guard lock(mutex_);
+        reply = ok_response(a_request,
+                            nlohmann::json{{"serverTime", now_ms() + time_offset_ms_}});
     } else if (method == "order.place") {
         const std::lock_guard lock(mutex_);
         const auto result = handle_place(params);
-        reply = result.contains("code") ? error_response(a_request, 400, result["code"].get<int>(),
-                                                         result["msg"].get<std::string>())
-                                        : ok_response(a_request, result);
+        if (result.contains("code")) {
+            reply = error_response(a_request, 400, result["code"].get<int>(),
+                                   result["msg"].get<std::string>());
+        } else if (unknown_outcome_code_ != 0) {
+            // scripted unknown outcome: the place above DID land, but the
+            // venue answers with an execution-status-unknown error
+            const int code = unknown_outcome_code_;
+            unknown_outcome_code_ = 0;
+            reply = error_response(
+                a_request, 400, code,
+                code == -1007 ? "Timeout waiting for response from order service."
+                              : "An unexpected response was received from the order service.");
+        } else {
+            reply = ok_response(a_request, result);
+        }
     } else if (method == "order.cancel") {
         const std::lock_guard lock(mutex_);
         const auto result = handle_cancel(params);

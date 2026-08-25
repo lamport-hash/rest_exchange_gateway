@@ -491,6 +491,24 @@ TEST_CASE("venue unreachable: place fails with transport and never double-places
     CHECK(placement.error().code == "transport");
 }
 
+TEST_CASE("a 401 is definitive: no retry into a later 200")
+{
+    // Regression: every non-200 used to be "transport", so a persistent
+    // 401 burned the retry budget and re-sent the (identical, still
+    // unauthorized) place until a later response made it "succeed".
+    OkxMockServer server(base_config());
+    server.start();
+    OkxConnector connector = make_connector(server);
+    ExchangeConnector& connector_interface = connector;
+
+    server.set_next_raw_response(401, R"({"code":"50102","msg":"Invalid Sign","data":[]})");
+    const auto placement = connector_interface.place_order(limit_buy());
+    REQUIRE_FALSE(placement.is_ok());
+    CHECK(placement.error().code == "venue:50102");
+    // exactly one place hit the venue — no re-send, no lookup escalation
+    CHECK(count_recorded(server, "POST", "/api/v5/trade/order") == 1);
+}
+
 struct ReportLatch
 {
     std::mutex mutex;

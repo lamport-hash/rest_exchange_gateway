@@ -54,6 +54,11 @@ class OkxMockWsServer
 
     // ---- scripting (thread-safe) ----
     void set_login_should_fail(bool a_fail);
+    /// One-shot: serve this raw frame as the next login ack instead of
+    /// the well-formed reply (type-confusion / malformed-ack drills).
+    void set_raw_login_ack(std::string a_reply);
+    /// One-shot: serve this raw frame as the next subscribe ack.
+    void set_raw_subscribe_ack(std::string a_reply);
     void set_ignore_pings(bool a_ignore);
     /// Silently lose the next a_count pushed updates.
     void set_drop_next_updates(int a_count);
@@ -120,6 +125,8 @@ class OkxMockWsServer
     std::vector<Session*> sessions_; // guarded; only touched under mutex
     Stats stats_;
     bool login_should_fail_ = false;
+    std::string raw_login_ack_;
+    std::string raw_subscribe_ack_;
     bool ignore_pings_ = false;
     int drop_next_ = 0;
     bool duplicate_next_ = false;

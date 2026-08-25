@@ -144,7 +144,7 @@ if(GATEWAY_BUILD_TESTS)
     add_test(NAME clock_test COMMAND clock_test)
 
     add_executable(config_test tests/config_test.cpp)
-    target_link_libraries(config_test PRIVATE gateway_okx)
+    target_link_libraries(config_test PRIVATE gateway_okx gateway_binance)
     add_test(NAME config_test COMMAND config_test)
 
     add_executable(okx_signer_test tests/okx_signer_test.cpp)

@@ -27,14 +27,22 @@ struct BinanceConfig
     /// the outcome unknown ("transport"). Venue-side processing timeout
     /// is 10s, so this must be strictly larger.
     std::chrono::milliseconds request_timeout{12000};
+    /// WS protocol-level liveness: client pings every ws_ping_interval_s
+    /// seconds; after ws_max_missed_pongs unanswered pings the silent
+    /// socket is closed and the reconnect + re-subscribe + reconcile
+    /// path runs. Without it a half-open TCP connection stalls trading
+    /// until the OS read timeout (httplib default: 300s).
+    int ws_ping_interval_s = 20;
+    int ws_max_missed_pongs = 2;
     /// Retry policy for transport failures (also backs off reconnects).
     RetryPolicy retry;
 };
 
 /// Parse a BinanceConfig from the "binance" config section. Requires
 /// apiKey and secretKey; host/port/useTls/path/recvWindowMs/
-/// requestTimeoutMs and the "retry" sub-object are optional.
-/// Errors: "protocol" with the list of missing/invalid fields.
+/// requestTimeoutMs/wsPingIntervalSec/wsMaxMissedPongs and the "retry"
+/// sub-object are optional. Errors: "protocol" with the list of
+/// missing/invalid fields.
 [[nodiscard]] auto
 binance_config_from_json(const nlohmann::json& a_section) -> Result<BinanceConfig>;
 

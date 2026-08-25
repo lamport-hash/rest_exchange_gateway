@@ -18,6 +18,10 @@ namespace gateway::exchange::okx {
 
 namespace {
 
+/// A subscribed session alive at least this long counts as healthy even
+/// without inbound traffic (quiet but functional link).
+constexpr auto kHealthySessionSeconds = std::chrono::seconds{30};
+
 /// Wait for a_duration, but wake up as soon as a_stop is requested.
 void interruptible_sleep(std::chrono::milliseconds a_duration, std::stop_token a_stop)
 {
@@ -33,6 +37,16 @@ auto now_ms() -> long long
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+/// Type-safe string field access: the value when a_name exists and is a
+/// string, empty otherwise. Unlike json::value(key, default) this never
+/// throws on a type-confused field (e.g. "code": 0) — a throw would
+/// escape the supervisor jthread and terminate the process.
+auto checked_string(const nlohmann::json& a_node, const char* a_name) -> std::string
+{
+    const auto it = a_node.find(a_name);
+    return it != a_node.end() && it->is_string() ? it->get<std::string>() : std::string{};
 }
 
 /// Sender-side keepalive: every ping_interval send the text "ping" (OKX
@@ -174,7 +188,7 @@ void OkxOrdersFeed::dispatch_orders_message(const nlohmann::json& a_message)
     }
 }
 
-auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
+auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> SessionOutcome
 {
     // Demo-trading credentials only authenticate against the demo WS host;
     // the production host rejects them with 50101.
@@ -198,11 +212,12 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
         close_active_session_ = [&client] { client.close(); };
     }
 
-    const std::string failure = [this, &client, &a_stop, &url]() -> std::string {
+    const SessionOutcome outcome = [this, &client, &a_stop, &url]() -> SessionOutcome {
         const auto connected = client.connect();
         if (!connected) {
-            return "connect failed to " + url + ": error " +
-                   std::to_string(static_cast<int>(connected.error()));
+            return SessionOutcome{.failure = "connect failed to " + url + ": error " +
+                                                 std::to_string(static_cast<int>(
+                                                     connected.error()))};
         }
 
         // login (epoch seconds.millis timestamp — the WS login rejects
@@ -216,16 +231,16 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
                                      {"timestamp", timestamp},
                                      {"sign", sign_ws_login(timestamp, config_.secret_key)}}})}};
         if (!client.send(login.dump())) {
-            return "failed to send login request";
+            return SessionOutcome{.failure = "failed to send login request"};
         }
         std::string reply;
         if (client.read(reply) != httplib::ws::ReadResult::Text) {
-            return "connection closed waiting for login ack";
+            return SessionOutcome{.failure = "connection closed waiting for login ack"};
         }
         const auto login_ack = nlohmann::json::parse(reply, nullptr, false);
-        if (!login_ack.is_object() || login_ack.value("event", std::string()) != "login" ||
-            login_ack.value("code", std::string()) != "0") {
-            return "login rejected: " + reply;
+        if (!login_ack.is_object() || checked_string(login_ack, "event") != "login" ||
+            checked_string(login_ack, "code") != "0") {
+            return SessionOutcome{.failure = "login rejected: " + reply};
         }
 
         // subscribe to the orders channel. Live OKX rejects a bare
@@ -235,18 +250,20 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
             {"op", "subscribe"},
             {"args", nlohmann::json::array({{{"channel", "orders"}, {"instType", "SPOT"}}})}};
         if (!client.send(subscribe.dump())) {
-            return "failed to send subscribe request";
+            return SessionOutcome{.failure = "failed to send subscribe request"};
         }
         std::string sub_reply;
         if (client.read(sub_reply) != httplib::ws::ReadResult::Text) {
-            return "connection closed waiting for subscribe ack";
+            return SessionOutcome{.failure = "connection closed waiting for subscribe ack"};
         }
         const auto sub_ack = nlohmann::json::parse(sub_reply, nullptr, false);
-        if (!sub_ack.is_object() || sub_ack.value("event", std::string()) != "subscribe") {
-            return "subscribe rejected: " + sub_reply;
+        if (!sub_ack.is_object() || checked_string(sub_ack, "event") != "subscribe") {
+            return SessionOutcome{.failure = "subscribe rejected: " + sub_reply};
         }
 
         emit(FeedEventType::Connected, "orders channel subscribed");
+        const auto subscribed_at = std::chrono::steady_clock::now();
+        bool inbound_after_subscribe = false;
 
         // ---- reader + keepalive ----
         std::atomic<long long> last_inbound_ms{now_ms()};
@@ -269,6 +286,7 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
                 break;
             }
             last_inbound_ms.store(now_ms(), std::memory_order_relaxed);
+            inbound_after_subscribe = true; // any frame (pong included) proves life
 
             if (message == "pong") {
                 continue;
@@ -298,26 +316,36 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> std::string
         pinger.request_stop();
         client.close();
         pinger.join();
-        return reason;
+        return SessionOutcome{
+            .failure = reason,
+            .healthy = inbound_after_subscribe ||
+                       std::chrono::steady_clock::now() - subscribed_at >=
+                           kHealthySessionSeconds};
     }();
 
     {
         const std::lock_guard lock(session_mutex_);
         close_active_session_ = nullptr;
     }
-    return failure;
+    return outcome;
 }
 
 void OkxOrdersFeed::run(std::stop_token a_stop)
 {
     unsigned connect_attempt = 0;
     while (!a_stop.stop_requested()) {
-        const std::string failure = run_session(a_stop);
+        const SessionOutcome outcome = run_session(a_stop);
         if (a_stop.stop_requested()) {
             break;
         }
+        if (outcome.healthy) {
+            // the venue was reachable and responsive this session: the
+            // next failure is a fresh incident, not the tail of the last
+            // one — start the backoff over instead of climbing to max
+            connect_attempt = 0;
+        }
         ++connect_attempt;
-        emit(FeedEventType::Disconnected, failure);
+        emit(FeedEventType::Disconnected, outcome.failure);
 
         static thread_local std::mt19937_64 engine{std::random_device{}()};
         std::uniform_real_distribution<double> uniform{0.0, 1.0};

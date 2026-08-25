@@ -64,6 +64,22 @@ auto binance_config_from_json(const nlohmann::json& a_section) -> Result<Binance
             config.request_timeout = std::chrono::milliseconds{it->get<long long>()};
         }
     }
+    if (const auto it = a_section.find("wsPingIntervalSec");
+        it != a_section.end() && !it->is_null()) {
+        if (!it->is_number_integer() || it->get<long long>() < 1 || it->get<long long>() > 300) {
+            problems.push_back("wsPingIntervalSec must be an integer in [1, 300]");
+        } else {
+            config.ws_ping_interval_s = static_cast<int>(it->get<long long>());
+        }
+    }
+    if (const auto it = a_section.find("wsMaxMissedPongs");
+        it != a_section.end() && !it->is_null()) {
+        if (!it->is_number_integer() || it->get<long long>() < 1 || it->get<long long>() > 100) {
+            problems.push_back("wsMaxMissedPongs must be an integer in [1, 100]");
+        } else {
+            config.ws_max_missed_pongs = static_cast<int>(it->get<long long>());
+        }
+    }
     if (const auto it = a_section.find("retry"); it != a_section.end() && !it->is_null()) {
         auto retry = retry_policy_from_json(*it, config.retry);
         if (!retry.is_ok()) {

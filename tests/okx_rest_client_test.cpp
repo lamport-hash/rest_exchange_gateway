@@ -382,6 +382,46 @@ TEST_CASE("malformed venue responses produce protocol errors")
     }
 }
 
+TEST_CASE("HTTP 4xx is classified, not blanket transport")
+{
+    OkxMockServer server(base_config());
+    server.start();
+    const auto client = fixed_clock_client(config_for(server));
+
+    SUBCASE("401 with an OKX envelope is a definitive venue error")
+    {
+        server.set_next_raw_response(401, R"({"code":"50102","msg":"Invalid Sign","data":[]})");
+        const auto result = client.place_order(limit_buy());
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "venue:50102");
+    }
+
+    SUBCASE("400 without an OKX envelope is a protocol error")
+    {
+        server.set_next_raw_response(400, R"({"oops":1})");
+        const auto result = client.place_order(limit_buy());
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "protocol");
+    }
+
+    SUBCASE("429 stays transport (rate limited, retry budget applies)")
+    {
+        server.set_next_raw_response(429, R"({"code":"50011","msg":"Rate limit reached","data":[]})");
+        const auto result = client.place_order(limit_buy());
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "transport");
+        CHECK(result.error().message.find("429") != std::string::npos);
+    }
+
+    SUBCASE("401 on the public ticker without an envelope is a protocol error")
+    {
+        server.set_next_raw_response(401, "Forbidden");
+        const auto result = client.get_ticker("BTC-USDT");
+        REQUIRE_FALSE(result.is_ok());
+        CHECK(result.error().code == "protocol");
+    }
+}
+
 TEST_CASE("get_ticker returns the last price of a public instrument")
 {
     OkxMockServer server(base_config());

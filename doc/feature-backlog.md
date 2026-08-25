@@ -6,27 +6,46 @@ deliverables — those are met (see the compliance matrix there).
 
 ## P1 — robustness fixes (small, high value)
 
-- [ ] OKX REST: classify 4xx as `protocol`/venue, not `transport` — a
+- [x] OKX REST: classify 4xx as `protocol`/venue, not `transport` — a
       persistent auth failure currently burns the retry budget and looks
       like a network outage (`okx_rest_client.cpp:208`)
-- [ ] OKX WS: replace throwing `json::value(key, default)` in login/
+      *(done 2026-08-24: 5xx/429 stay transport; other 4xx parse the OKX
+      envelope → `venue:<code>`, else `protocol`)*
+- [x] OKX WS: replace throwing `json::value(key, default)` in login/
       subscribe ack parsing — a type-confused ack terminates the process
       (`okx_ws_client.cpp:226,245`)
-- [ ] Binance: handle `-1021` clock skew — serverTime offset sync and/or
+      *(done 2026-08-24: non-throwing `checked_string`, session-fails and
+      reconnects instead)*
+- [x] Binance: handle `-1021` clock skew — serverTime offset sync and/or
       re-sign retry; today skew > recvWindow kills every signed request
       (`binance_ws_client.cpp:225`)
-- [ ] Binance: map `-1006`/`-1007` ("execution status unknown") to
+      *(done 2026-08-24: best-effort `time` sync at session start + sync/
+      re-sign-once per signed call; persisting skew → `protocol`)*
+- [x] Binance: map `-1006`/`-7` ("execution status unknown") to
       `transport` so they enter resolve-then-retry (`binance_ws_client.cpp:221`)
-- [ ] Binance: enable WS pong-timeout liveness (httplib
+      *(done 2026-08-24)*
+- [x] Binance: enable WS pong-timeout liveness (httplib
       `CPPHTTPLIB_WEBSOCKET_MAX_MISSED_PONGS > 0`) — half-open
       connections currently stall trading up to the 300 s read timeout
-- [ ] Binance: reset reconnect backoff after a healthy session
+      *(done 2026-08-24: `wsPingIntervalSec=20` / `wsMaxMissedPongs=2`
+      defaults + a bounded read deadline so a fully silent wire is
+      observed)*
+- [x] Binance: reset reconnect backoff after a healthy session
       (`connect_attempt` is monotone today) (`binance_ws_client.cpp:469`)
+      *(done 2026-08-24: healthy = subscribed AND (response served OR
+      30 s uptime); OKX got the same reset)*
 - [ ] TLS server-cert verification on OKX `SSLClient`
       (`okx_rest_client.cpp:33`)
-- [ ] Binance: verify `-4116` against the real Spot testnet (documented
+      *(verified 2026-08-24: premise false — the vendored httplib already
+      defaults `server_certificate_verification_ = true` and nothing
+      disables it; only an opt-out knob could be added, no robustness
+      gain)*
+- [x] Binance: verify `-4116` against the real Spot testnet (documented
       only in the mock); make the duplicate-resolve path tolerant of the
       actual code the venue sends
+      *(done 2026-08-24 mock-side: resolve triggers on `-4116`, `-2010`
+      or a duplicate/already-exists message; **live testnet verification
+      of the actual code still open**)*
 
 ## P2 — spec deviations / semantics polish
 

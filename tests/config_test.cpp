@@ -2,6 +2,7 @@
 #include <doctest.h>
 
 #include "core/config.hpp"
+#include "exchange/binance/binance_config.hpp"
 #include "exchange/okx/okx_rest_client.hpp"
 
 #include <filesystem>
@@ -325,6 +326,37 @@ TEST_CASE("okx rest timeout overrides are validated")
     CHECK_FALSE(parse(R"("restReadTimeoutMs":0)").is_ok());
     CHECK_FALSE(parse(R"("restReadTimeoutMs":"500")").is_ok());
     CHECK_FALSE(parse(R"("restConnectTimeoutMs":-1)").is_ok());
+}
+
+TEST_CASE("binance ws watchdog defaults enable the liveness check")
+{
+    // Regression: httplib defaults to max_missed_pongs = 0, which
+    // DISABLES pong-timeout detection — a silent socket then stalls
+    // until the 300s OS read timeout. The gateway default must keep the
+    // watchdog armed.
+    const auto section =
+        nlohmann::json::parse(R"({"apiKey":"k","secretKey":"s"})");
+    const auto result = gateway::exchange::binance::binance_config_from_json(section);
+    REQUIRE(result.is_ok());
+    CHECK(result.value().ws_ping_interval_s == 20);
+    CHECK(result.value().ws_max_missed_pongs == 2);
+}
+
+TEST_CASE("binance ws watchdog overrides are parsed and validated")
+{
+    const auto parse = [](const std::string& a_extra) {
+        return gateway::exchange::binance::binance_config_from_json(nlohmann::json::parse(
+            R"({"apiKey":"k","secretKey":"s",)" + a_extra + "}"));
+    };
+    const auto ok = parse(R"("wsPingIntervalSec":5,"wsMaxMissedPongs":4)");
+    REQUIRE(ok.is_ok());
+    CHECK(ok.value().ws_ping_interval_s == 5);
+    CHECK(ok.value().ws_max_missed_pongs == 4);
+
+    CHECK_FALSE(parse(R"("wsPingIntervalSec":0)").is_ok());
+    CHECK_FALSE(parse(R"("wsPingIntervalSec":301)").is_ok());
+    CHECK_FALSE(parse(R"("wsMaxMissedPongs":0)").is_ok());
+    CHECK_FALSE(parse(R"("wsMaxMissedPongs":"2")").is_ok());
 }
 
 } // namespace

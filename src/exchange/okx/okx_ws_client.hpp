@@ -49,7 +49,10 @@ struct FeedEvent
 ///   (max_missed_pongs + 1) * ping_interval is closed and reconnected
 /// - on any disconnect: reconnect with exponential backoff + jitter (the
 ///   retry section of OkxConfig; unbounded attempts), re-login and
-///   re-subscribe. Missed fills are reconciled in phase 3.
+///   re-subscribe. The backoff resets to the initial value after every
+///   healthy session (the venue was proven reachable, so one early
+///   failure must not pin it at max backoff). Missed fills are
+///   reconciled in phase 3.
 ///
 /// Threading: reports are delivered on the session reader thread, feed
 /// events on the supervisor thread. Handlers must be installed before
@@ -80,12 +83,22 @@ class OkxOrdersFeed final
     [[nodiscard]] auto is_running() const -> bool;
 
   private:
+    /// Result of one connect -> login -> subscribe -> read cycle.
+    struct SessionOutcome
+    {
+        /// Why the session ended (empty when stopped by the caller).
+        std::string failure;
+        /// Subscribed AND proven alive (inbound traffic after the
+        /// subscribe — e.g. pongs — or a subscribed uptime >= 30s).
+        /// A healthy session resets the reconnect backoff.
+        bool healthy = false;
+    };
+
     void emit(FeedEventType a_type, std::string a_detail) const;
     void run(std::stop_token a_stop);
 
-    /// One connect -> login -> subscribe -> read cycle. Returns the failure
-    /// reason that ended the session (empty when stopped by the caller).
-    [[nodiscard]] auto run_session(std::stop_token a_stop) -> std::string;
+    /// One connect -> login -> subscribe -> read cycle.
+    [[nodiscard]] auto run_session(std::stop_token a_stop) -> SessionOutcome;
 
     /// Normalize one orders-channel message and deliver execution reports.
     void dispatch_orders_message(const nlohmann::json& a_message);

@@ -23,19 +23,24 @@ namespace gateway::testing {
 /// - userDataStream.subscribe.signature: verifies apiKey + HMAC signature
 ///   (recomputed from the received params) like the venue does
 /// - order.place: creates an order (status NEW); duplicate open
-///   clientOrderId -> error -4116; bad signature -> -1022; unknown
+///   clientOrderId -> error -4116 (or a scripted code via
+///   set_next_duplicate_error_code()); bad signature -> -1022; unknown
 ///   apiKey -> -2014; timestamps outside recvWindow -> -1021
 /// - order.cancel: unknown/terminal target -> -2011
 /// - order.cancelReplace (STOP_ON_FAILURE): cancel + replacement place;
 ///   unknown/terminal target -> -2011
 /// - order.status: unknown order -> -2013; otherwise a status payload
 /// - openOrders.status: every non-terminal order
+/// - ticker.price / time: public (unsigned) market data; time serves
+///   serverTime = real now + set_time_offset()
 ///
 /// Scripting: fills via apply_fill()/set_fill_mode(Full); pushes via
 /// push_execution_report() (subscription-gated, drop/duplicate control);
 /// set_drop_next_response() processes a request but loses its response
-/// (outcome-unknown drills); kill_connections()/restart_on_same_port()
-/// kill the transport; set_delay_next_response() delays one reply.
+/// (outcome-unknown drills); set_next_place_unknown_outcome() lands the
+/// order but answers with -1006/-1007 (outcome-unknown drills);
+/// kill_connections()/restart_on_same_port() kill the transport;
+/// set_delay_next_response() delays one reply.
 ///
 /// Every received frame is recorded for assertions.
 class BinanceMockWsServer
@@ -75,6 +80,17 @@ class BinanceMockWsServer
     /// Process the next request normally but drop its response: the
     /// outcome happened, the acknowledgement is lost (one-shot).
     void set_drop_next_response();
+    /// One-shot: the next order.place IS executed (the order lands) but
+    /// the response is a 400-wrapped venue error with a_code (e.g. -1006
+    /// / -1007: outcome unknown, resolve-then-retry drills).
+    void set_next_place_unknown_outcome(int a_code);
+    /// One-shot: the next duplicate-open-clientOrderId place reject uses
+    /// a_code instead of the default -4116 (e.g. -2010: live venues
+    /// surface duplicates under different codes).
+    void set_next_duplicate_error_code(int a_code);
+    /// Offset added to serverTime by the public "time" method (clock-skew
+    /// drills; persistent until changed).
+    void set_time_offset(long long a_offset_ms);
     /// Delay the next response by a_ms (still delivered).
     void set_delay_next_response(unsigned a_ms);
     /// Skip apiKey/signature/timestamp verification (auth drills off).
@@ -174,6 +190,9 @@ class BinanceMockWsServer
     std::string ticker_symbol_ = "BTCUSDT";
     std::string ticker_price_ = "50000";
     bool drop_next_response_ = false;
+    int unknown_outcome_code_ = 0;
+    int duplicate_error_code_ = 0;
+    long long time_offset_ms_ = 0;
     unsigned delay_next_ms_ = 0;
     bool ignore_signature_ = false;
     int drop_next_updates_ = 0;

@@ -57,6 +57,29 @@ auto parse_envelope(const std::string& a_body, const std::string& a_path) -> Res
     return envelope;
 }
 
+/// Classify a non-200 HTTP status using the raw body:
+/// - 5xx and 429 → "transport" (server-side trouble / rate limiting;
+///   retried by the connector's transport policy)
+/// - other 4xx → definitive: an OKX envelope with a non-"0" code yields
+///   its "venue:<code>"; anything else is a "protocol" error (malformed
+///   request/auth path that never arrived at the trading engine).
+/// 401/400 must NOT be retried: they cannot succeed on a second attempt
+/// with identical credentials, and treating them as transport burns the
+/// retry budget while misreporting "cannot reach the venue".
+auto classify_http_error(int a_status, const std::string& a_body, const std::string& a_path)
+    -> Error
+{
+    const auto describe = "unexpected HTTP status " + std::to_string(a_status) + " from " + a_path;
+    if (a_status >= 500 || a_status == 429) {
+        return Error{"transport", describe};
+    }
+    const auto envelope = parse_envelope(a_body, a_path);
+    if (!envelope.is_ok() && envelope.error().code.rfind("venue:", 0) == 0) {
+        return envelope.error();
+    }
+    return Error{"protocol", describe + " without an OKX error envelope: " + a_body};
+}
+
 template <typename ClientT>
 auto perform_request(const OkxConfig& a_config, std::string_view a_method,
                      const std::string& a_path, const httplib::Headers& a_headers,
@@ -249,8 +272,7 @@ auto OkxRestClient::signed_request(const char* a_method, const std::string& a_pa
         return raw.error();
     }
     if (raw.value().first != 200) {
-        return Error{"transport", "unexpected HTTP status " + std::to_string(raw.value().first) +
-                                      " from " + a_path};
+        return classify_http_error(raw.value().first, raw.value().second, a_path);
     }
     return parse_envelope(raw.value().second, a_path);
 }
@@ -348,12 +370,7 @@ auto OkxRestClient::adjust_demo_balance(const OkxDemoBalanceRequest& a_request) 
     }
     const auto& [status, body] = raw.value();
     if (status != 200) {
-        const auto envelope = parse_envelope(body, kPathDemoAdjustBalance);
-        if (!envelope.is_ok() && envelope.error().code.rfind("venue:", 0) == 0) {
-            return envelope.error();
-        }
-        return Error{"transport", "unexpected HTTP status " + std::to_string(status) + " from " +
-                                      std::string{kPathDemoAdjustBalance}};
+        return classify_http_error(status, body, kPathDemoAdjustBalance);
     }
     const auto envelope = parse_envelope(body, kPathDemoAdjustBalance);
     if (!envelope.is_ok()) {
@@ -373,8 +390,7 @@ auto OkxRestClient::get_ticker(const std::string& a_instrument_id) const -> Resu
         return Error{"transport", "network failure talking to " + config_.host};
     }
     if (result->status != 200) {
-        return Error{"transport",
-                     "unexpected HTTP status " + std::to_string(result->status) + " from " + path};
+        return classify_http_error(result->status, result->body, path);
     }
     const auto envelope = parse_envelope(result->body, kPathTicker);
     if (!envelope.is_ok()) {

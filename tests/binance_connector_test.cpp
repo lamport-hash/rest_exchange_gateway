@@ -310,6 +310,59 @@ TEST_CASE_FIXTURE(ConnectorFixture, "duplicate clientOrderId places resolve to t
     CHECK(server_->stats().places == 2); // two sends, one live order
 }
 
+TEST_CASE_FIXTURE(ConnectorFixture, "a -1006 place resolves to the landed order without re-send")
+{
+    // Regression: -1006 was a definitive venue rejection; per the docs the
+    // execution status is unknown, so the engine must resolve via
+    // order.status and never blindly re-send the place.
+    connector_->start();
+    server_->set_next_place_unknown_outcome(-1006);
+
+    const auto placement = connector_->place_order(place_request("co1006"));
+    REQUIRE(placement.is_ok());
+    CHECK(placement.value().client_order_id == "co1006");
+    // exactly one place reached the venue and landed — never a blind
+    // re-send (a re-send only ever follows a conclusive -2013 absence);
+    // resolution went through order.status (>= 1: an early lookup that
+    // raced session start may have seen a conclusive absence first)
+    CHECK(server_->stats().places == 1);
+    CHECK(server_->stats().status_queries >= 1);
+
+    // the resolved order is live on the venue
+    const auto snapshot = connector_->get_order(gateway::OrderQuery{"co1006", "BTC-USDT"});
+    REQUIRE(snapshot.is_ok());
+    REQUIRE(snapshot.value().has_value());
+    CHECK(snapshot.value()->state == gateway::OrderState::Live);
+}
+
+TEST_CASE_FIXTURE(ConnectorFixture, "duplicate rejects under other venue codes also resolve")
+{
+    // Live venues surface duplicate clientOrderIds under codes other than
+    // -4116 (e.g. -2010) or with an undocumented code whose message says
+    // duplicate; each spelling must resolve, not definitively reject.
+    connector_->start();
+    const auto first = connector_->place_order(place_request("co2010"));
+    REQUIRE(first.is_ok());
+
+    SUBCASE("code -2010 (no duplicate wording in the message)")
+    {
+        server_->set_next_duplicate_error_code(-2010);
+        const auto second = connector_->place_order(place_request("co2010"));
+        REQUIRE(second.is_ok());
+        CHECK(second.value().exchange_order_id == first.value().exchange_order_id);
+    }
+    SUBCASE("unknown code with a duplicate message")
+    {
+        server_->set_next_duplicate_error_code(-9999);
+        const auto second = connector_->place_order(place_request("co2010"));
+        REQUIRE(second.is_ok());
+        CHECK(second.value().exchange_order_id == first.value().exchange_order_id);
+    }
+    // each subcase re-runs the body: one initial place + one scripted
+    // duplicate place, a single live order on the venue
+    CHECK(server_->stats().places == 2);
+}
+
 TEST_CASE_FIXTURE(ConnectorFixture, "connectivity events reflect the session lifecycle")
 {
     struct Counters

@@ -113,6 +113,18 @@ void OkxMockWsServer::set_login_should_fail(bool a_fail)
     login_should_fail_ = a_fail;
 }
 
+void OkxMockWsServer::set_raw_login_ack(std::string a_reply)
+{
+    const std::lock_guard lock(mutex_);
+    raw_login_ack_ = std::move(a_reply);
+}
+
+void OkxMockWsServer::set_raw_subscribe_ack(std::string a_reply)
+{
+    const std::lock_guard lock(mutex_);
+    raw_subscribe_ack_ = std::move(a_reply);
+}
+
 void OkxMockWsServer::set_ignore_pings(bool a_ignore)
 {
     const std::lock_guard lock(mutex_);
@@ -274,6 +286,12 @@ void OkxMockWsServer::handle_text(httplib::ws::WebSocket& a_ws, Session& a_sessi
         } else {
             ++stats_.logins_failed;
         }
+        if (!raw_login_ack_.empty()) {
+            a_ws.send(std::move(raw_login_ack_)); // one-shot scripted ack
+            raw_login_ack_.clear();
+            cv_.notify_all();
+            return;
+        }
         cv_.notify_all();
         a_ws.send(ok ? login_reply_ok() : login_reply_error(detail));
         return;
@@ -305,6 +323,11 @@ void OkxMockWsServer::handle_text(httplib::ws::WebSocket& a_ws, Session& a_sessi
         }
         stats_.subscribed_sessions = subscribed_count;
         cv_.notify_all();
+        if (!raw_subscribe_ack_.empty()) {
+            a_ws.send(std::move(raw_subscribe_ack_)); // one-shot scripted ack
+            raw_subscribe_ack_.clear();
+            return;
+        }
         if (string_field(arg, "channel") == "orders" && !is_orders) {
             a_ws.send(subscribe_error_reply());
             return;
