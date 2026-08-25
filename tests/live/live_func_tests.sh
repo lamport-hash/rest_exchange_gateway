@@ -22,28 +22,34 @@
 # closed port.
 #
 # Venue facts baked into the parameters below:
-# - OKX demo: BTC-USDT, price band wide enough for a fixed 10000 far
-#   price; amend keeps the exchangeOrderId.
-# - Binance spot testnet: BTCUSDT, PERCENT_PRICE_BY_SIDE band
-#   [0.5x avg, 2x avg] forces ticker-derived prices; NOTIONAL filter
-#   (min 5 USDT) forces qty >= 0.0002 at ~0.55x last; amend is
-#   cancelReplace emulation -> NEW exchangeOrderId, same clientOrderId.
+# - Cost model: BTC is hardcoded at BTC_USD (70000) for quantity
+#   derivation; every suite order is sized so the WHOLE run consumes
+#   well under 1000 USDT of demo funds (hard-checked at the end).
+# - Resting price REST_PX (65000, ~0.8x a ~80k market) stays inside the
+#   Binance PERCENT_PRICE_BY_SIDE band [0.5x avg, 2x avg]; a preflight
+#   guard aborts if the live market drifted outside that assumption.
+# - Crossing price is last * 1.01 (aggressive, instant fill) for both
+#   the single-fill section and the amend-to-cross section.
+# - OKX demo: amend keeps the exchangeOrderId.
+# - Binance spot testnet: BTCUSDT, NOTIONAL filter (min 5 USDT) forces
+#   BASE_QTY such that qty * REST_PX > 5; amend is cancelReplace
+#   emulation -> NEW exchangeOrderId, same clientOrderId.
 #
 # Not covered here (impossible against the live venue; covered by the
 # deterministic rigs in tests/ and tests/blackbox/):
 # - WS server-side disconnect / reconnect (we cannot kill the venue)
 # - fault injection (dropped acks / delayed responses)
 # - Binance insufficient-balance rejection inside tight risk caps
+#   (buy-side; the sell-side variant IS covered here — see section 13)
 #
 # Prerequisites: config/gateway.json (gitignored) with valid venue demo
 # credentials and demo funds (Binance testnet: >= ~20 USDT and a little
 # BTC); internet access. The suite cancels or leaves canceled every
-# order it creates. It spends a tiny amount of demo funds: one
-# aggressive limit buy of ~0.00011 BTC, three crossing amends of
-# 3 x BASE_QTY BTC, then sells 0.0001 BTC back via a
-# market order (round-trip, net BTC change ~+3 x BASE_QTY). On Binance
-# the position test additionally locks ~0.13 BTC * far-price
-# (~5600 USDT) while it runs, then cancels.
+# order it creates. Budget: every order is sized off a hardcoded 70000
+# USDT/BTC (BASE_QTY = 7/70000 BTC); the whole run buys ~4 x BASE_QTY
+# BTC (~28 USDT) and sells the wallet back in section 15, transient
+# working-order locks stay under ~70 USDT, and a start/end balance
+# check HARD-FAILS the run if net consumption reaches 1000 USDT.
 #
 # Usage (host or inside the dev container — the script re-execs itself in
 # the container when started on the host):
@@ -221,39 +227,64 @@ place_body() { # clientOrderId price quantity [extra-json-fields]
 }
 
 # ---- venue parameters -------------------------------------------------------
-# Prices for Binance are ticker-derived: PERCENT_PRICE_BY_SIDE only
-# accepts buy prices in [0.5x avg, 2x avg]. OKX tolerates a fixed 10000.
+# Shared cost model (both venues): BTC valued at BTC_USD for sizing, all
+# orders priced off REST_PX (resting) or last*CROSS_FACTOR (crossing).
+BTC_USD="70000"     # hardcoded theoretical BTC price for quantity math
+REST_PX="65000"     # resting price (~0.8x an ~80k market; far from mid)
+# BASE_QTY: ~7 USDT notional at the theoretical price (7 / 70000); at
+# REST_PX it is 6.5 USDT — above Binance's 5-USDT NOTIONAL minimum and
+# above OKX BTC-USDT minSz, while every fill costs pennies.
+BASE_QTY="0.0001"
+# Dynamic, per-venue (see the case table): the crossing price is
+# last * CROSS_FACTOR (+1 tick) — aggressive, instant fill.
+CROSS_FACTOR=""
+
 case "$VENUE" in
     okx)
         VENUE_ID="OKX"
         TICKER_URL='https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT'
         TICKER_FIELD='"last":"[0-9.]*"'
+        # OKX rejects BUY prices above ~last*1.005 (error 51137 "highest
+        # price limit for the buy leg"), so +1% can never rest there;
+        # +0.4% still crosses the tight demo book instantly.
+        CROSS_FACTOR="1.004"
         RISK_MAX_NOTIONAL="100000"
-        RISK_MAX_POSITION="1"
-        BASE_QTY="0.0001" # ~1 USDT locked at the far price
-        AMEND_QTY="0.0002"
-        POS_QTY="0.6" # projected 0.6 + 0.6 = 1.2 > maxPosition 1
+        # headroom above the funds candidate (qty 1) so reconciliation
+        # adopting stray resting venue orders cannot flip that test to a
+        # gateway-side rejection
+        RISK_MAX_POSITION="1.1"
+        AMEND_QTY="0.0002" # ~14 USDT at the theoretical price
+        POS_QTY="0.6" # projected 0.6 + 0.6 = 1.2 > maxPosition 1.1
         POS_PX="100" # locks 0.6 * 100 = 60 USDT on the venue
         NOTIONAL_PX="150000" # 150000 * 1 > maxNotional (gateway-side)
-        FUNDS_QTY="1"
+        FUNDS_QTY="1" # buy ~78k USDT > demo wallet -> venue rejection
         FUNDS_FACTOR="0.99" # inside the venue buy band, above the wallet
+        MINORD_PX="10000" # far outside the OKX buy band -> 51020
         MINORD_MATCH="51020"
         ;;
     binance)
         VENUE_ID="BINANCE"
         TICKER_URL='https://testnet.binance.vision/api/v3/ticker/price?symbol=BTCUSDT'
         TICKER_FIELD='"price":"[0-9.]*"'
+        # Binance's PERCENT_PRICE_BY_SIDE allows buy prices up to 2x avg,
+        # so the full +1% crossing price is fine here.
+        CROSS_FACTOR="1.01"
         RISK_MAX_NOTIONAL="1000000"
-        RISK_MAX_POSITION="0.25"
-        BASE_QTY="0.0002" # NOTIONAL filter: qty * far price must be > 5 USDT
-        AMEND_QTY="0.0004"
-        POS_QTY="0.13" # projected 0.13 + 0.13 = 0.26 > maxPosition 0.25
-        POS_PX="" # = FAR_PX (0.55x last); locks ~5600 USDT on the testnet
-        NOTIONAL_PX="1500000" # 1500000 * 1 > maxNotional (gateway-side)
-        FUNDS_QTY="0.2"
-        FUNDS_FACTOR="1.7" # inside the 2x band, notional > testnet wallet
+        # Tight position cap keeps the position-test lock at ~6.5 USDT
+        # (BASE_QTY * REST_PX) instead of thousands.
+        RISK_MAX_POSITION="0.002"
+        AMEND_QTY="0.0002" # ~13 USDT at REST_PX (above the 5-USDT floor)
+        POS_QTY="0.002" # candidate: working BASE_QTY + 0.002 > 0.002 cap
+        POS_PX="$REST_PX" # working order locks BASE_QTY * 65000 = 6.5 USDT
+        NOTIONAL_PX="1500000" # 1500000 * 1 > maxNotional (gateway-side;
+        # the notional check fires before the position check, so qty 1 is
+        # fine even under the tight 0.002 position cap)
+        # funds test is sell-side (see section 13): sells more BTC than
+        # the wallet holds -> venue -2010, no quote ccy locked at all
+        FUNDS_OVER="0.0005"
         # the numeric venue code is not mapped into the REST error body;
         # the filter name is (Binance: "Filter failure: NOTIONAL")
+        MINORD_PX="$REST_PX" # 0.00001 * 65000 = 0.65 USDT < 5 -> NOTIONAL
         MINORD_MATCH="Filter failure: NOTIONAL"
         ;;
 esac
@@ -268,6 +299,51 @@ if grep -q 'YOUR_OKX\|YOUR_BINANCE' "$CONFIG_ARG"; then
     echo "error: $CONFIG_ARG still contains placeholder credentials" >&2
     exit 1
 fi
+
+# Free USDT + BTC of the account (stdout: "usdt btc"). Used for the
+# start/end budget guard and to size the sell-side tests dynamically so
+# successive suite runs never leak locked funds.
+venue_balance() { # out-file
+    if [ "$VENUE" = "binance" ]; then
+        python3 - "$CONFIG_ARG" >"$1" <<'EOF'
+import hashlib, hmac, json, sys, time, urllib.request
+cfg = json.load(open(sys.argv[1]))["binance"]
+q = f"timestamp={int(time.time()*1000)}&recvWindow=10000"
+sig = hmac.new(cfg["secretKey"].encode(), q.encode(), hashlib.sha256).hexdigest()
+req = urllib.request.Request(
+    f"https://testnet.binance.vision/api/v3/account?{q}&signature={sig}",
+    headers={"X-MBX-APIKEY": cfg["apiKey"], "User-Agent": "curl/8"})
+bal = {b["asset"]: float(b["free"]) for b in json.load(urllib.request.urlopen(req, timeout=10))["balances"]}
+print(f"{bal.get('USDT', 0):.8f} {bal.get('BTC', 0):.8f}")
+EOF
+    else
+        python3 - "$CONFIG_ARG" >"$1" <<'EOF'
+import base64, datetime, hashlib, hmac, json, sys, urllib.request
+cfg = json.load(open(sys.argv[1]))["okx"]
+path = "/api/v5/account/balance?ccy=BTC,USDT"
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+sign = base64.b64encode(hmac.new(cfg["secretKey"].encode(),
+                                 (ts + "GET" + path).encode(), hashlib.sha256).digest()).decode()
+req = urllib.request.Request("https://www.okx.com" + path, headers={
+    "OK-ACCESS-KEY": cfg["apiKey"], "OK-ACCESS-SIGN": sign,
+    "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": cfg["passphrase"],
+    "x-simulated-trading": "1", "User-Agent": "Mozilla/5.0"})
+data = json.load(urllib.request.urlopen(req, timeout=10))["data"][0]["details"]
+bal = {d["ccy"]: float(d["availBal"] or 0) for d in data}
+print(f"{bal.get('USDT', 0):.8f} {bal.get('BTC', 0):.8f}")
+EOF
+    fi
+}
+
+BUDGET_MAX_USDT="1000"
+venue_balance "$WORK/balance_start" || {
+    echo "error: cannot read the $VENUE account balance for the budget guard" >&2
+    exit 1
+}
+START_USDT="$(awk '{print $1}' "$WORK/balance_start")"
+START_BTC="$(awk '{print $2}' "$WORK/balance_start")"
+echo "== budget guard: start free $START_USDT USDT / $START_BTC BTC (cap ${BUDGET_MAX_USDT} USDT) =="
+
 if [ "$VENUE" = "binance" ]; then
     # validate the testnet keys before wasting a gateway start (signed, read-only)
     python3 - "$CONFIG_ARG" <<'EOF' || exit 1
@@ -289,10 +365,10 @@ except Exception as e:
 bal = {b["asset"]: float(b["free"]) for b in acct["balances"]}
 if bal.get("USDT", 0) < 20:
     print(f"warning: only {bal.get('USDT', 0)} USDT free on the testnet; "
-          "the fill/funds tests need ~20+ USDT")
+          "the fill tests need ~20+ USDT")
 if bal.get("BTC", 0) < 0.0002:
     print(f"warning: only {bal.get('BTC', 0)} BTC free on the testnet; "
-          "the market-sell test needs >= 0.0002 BTC")
+          "the sell-side funds test needs a little BTC (it self-skips otherwise)")
 EOF
 fi
 
@@ -358,13 +434,16 @@ if [ "$VENUE" = "binance" ]; then
         echo "error: cannot fetch BTCUSDT ticker from the testnet; aborting" >&2
         exit 1
     fi
-    FAR_PX="$(python3 -c "print(f'{int(float('$LAST') * 0.55):.2f}')")" # 0.55x last, tick 0.01
-else
-    FAR_PX="10000"
+    # PERCENT_PRICE_BY_SIDE accepts buy prices in [0.5x avg, 2x avg]:
+    # REST_PX (65000) must sit inside that window around the live price.
+    if ! python3 -c "exit(0 if float('$LAST') * 0.5 <= $REST_PX <= float('$LAST') * 2 else 1)"; then
+        echo "error: BTCUSDT at $LAST puts REST_PX $REST_PX outside the" \
+            "[0.5x, 2x] PERCENT_PRICE_BY_SIDE band; update REST_PX/BTC_USD" >&2
+        exit 1
+    fi
 fi
-[ -n "$POS_PX" ] || POS_PX="$FAR_PX" # binance derives it from the band
 ID_A="$(new_id A)"
-gw POST /orders "$(place_body "$ID_A" "$FAR_PX" "$BASE_QTY")"
+gw POST /orders "$(place_body "$ID_A" "$REST_PX" "$BASE_QTY")"
 assert_eq "POST /orders -> 201" "201" "$STATUS"
 [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
 ORD_A="$(json_field "$BODY" exchangeOrderId)"
@@ -385,7 +464,7 @@ fi
 
 # ---- 4. idempotent client retry -------------------------------------------
 echo "== 4. same clientOrderId twice -> same outcome =="
-gw POST /orders "$(place_body "$ID_A" "$FAR_PX" "$BASE_QTY")"
+gw POST /orders "$(place_body "$ID_A" "$REST_PX" "$BASE_QTY")"
 assert_eq "re-POST same clientOrderId -> 201" "201" "$STATUS"
 assert_eq "replayed=true (registry replay)" "true" "$(json_flag "$BODY" replayed)"
 assert_eq "same exchangeOrderId as first place" "$ORD_A" "$(json_field "$BODY" exchangeOrderId)"
@@ -395,8 +474,8 @@ echo "== 5. PUT amend price =="
 if [ "$VENUE" = "binance" ]; then
     # amend is cancelReplace emulation: the replacement keeps the
     # clientOrderId but receives a NEW exchangeOrderId
-    AMEND1="$(python3 -c "print(f'{float('$FAR_PX') + 1:.2f}')")"
-    AMEND2="$(python3 -c "print(f'{float('$FAR_PX') + 2:.2f}')")"
+    AMEND1="$(python3 -c "print(f'{float('$REST_PX') + 1:.2f}')")"
+    AMEND2="$(python3 -c "print(f'{float('$REST_PX') + 2:.2f}')")"
     gw PUT "/orders/$ID_A" "{\"price\":\"$AMEND1\"}"
     assert_eq "PUT amend -> 200" "200" "$STATUS"
     gw GET "/orders/$ID_A"
@@ -475,20 +554,33 @@ assert_eq "timeInForce on market order -> 400" "400" "$STATUS"
 
 # ---- 12. pre-trade risk limits --------------------------------------------
 echo "== 12. pre-trade risk rejection (gateway-side) =="
-gw POST /orders "$(place_body "$(new_id R)" "$FAR_PX" 2)"
+gw POST /orders "$(place_body "$(new_id R)" "$REST_PX" 2)"
 assert_eq "quantity above maxQty -> 400" "400" "$STATUS"
 assert_contains "risk_max_qty code" "$BODY" '"code":"risk_max_qty"'
 gw POST /orders "$(place_body "$(new_id N)" "$NOTIONAL_PX" 1)"
 assert_eq "notional above maxNotional -> 400" "400" "$STATUS"
 assert_contains "risk_max_notional code" "$BODY" '"code":"risk_max_notional"'
-# projected position: a working buy of POS_QTY plus a candidate buy of
-# POS_QTY projects 2*POS_QTY > maxPosition (gateway counts working +
-# filled qty). The working order locks POS_QTY * POS_PX of quote ccy.
+# projected position: a working buy plus a candidate buy projects above
+# maxPosition (gateway counts working + filled qty). The working order
+# is the suite's standard cheap order (BASE_QTY at REST_PX — locks ~6.5
+# USDT); only the candidate carries the oversized quantity, so rejected
+# orders lock nothing and the working lock is canceled right after.
 ID_P="$(new_id P)"
-gw POST /orders "$(place_body "$ID_P" "$POS_PX" "$POS_QTY")"
-assert_eq "position test order placed -> 201" "201" "$STATUS"
-[ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
-gw POST /orders "$(place_body "$(new_id Q)" "$POS_PX" "$POS_QTY")"
+if [ "$VENUE" = "okx" ]; then
+    # keeps the historic shape: both legs POS_QTY, the working one parked
+    # at a near-zero price so it locks only ~60 USDT of quote ccy.
+    gw POST /orders "$(place_body "$ID_P" "$POS_PX" "$POS_QTY")"
+    assert_eq "position test order placed -> 201" "201" "$STATUS"
+    [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
+    gw POST /orders "$(place_body "$(new_id Q)" "$POS_PX" "$POS_QTY")"
+else
+    # working = BASE_QTY at REST_PX (locks ~6.5 USDT); candidate POS_QTY
+    # projects BASE_QTY + POS_QTY > the 0.002 cap.
+    gw POST /orders "$(place_body "$ID_P" "$POS_PX" "$BASE_QTY")"
+    assert_eq "position test order placed -> 201" "201" "$STATUS"
+    [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
+    gw POST /orders "$(place_body "$(new_id Q)" "$POS_PX" "$POS_QTY")"
+fi
 assert_eq "projected position above maxPosition -> 400" "400" "$STATUS"
 assert_contains "risk_max_position code" "$BODY" '"code":"risk_max_position"'
 gw DELETE "/orders/$ID_P"
@@ -496,30 +588,49 @@ assert_eq "cleanup: cancel position test order" "200" "$STATUS"
 
 # ---- 13. venue rejections (live venue error codes) ------------------------
 echo "== 13. venue rejections -> 409 venue_rejected =="
-gw POST /orders "$(place_body "$(new_id M)" "$FAR_PX" 0.00001)"
+gw POST /orders "$(place_body "$(new_id M)" "$MINORD_PX" 0.00001)"
 assert_eq "venue filter rejection -> 409" "409" "$STATUS"
 assert_contains "venue_rejected error ($MINORD_MATCH)" "$BODY" "$MINORD_MATCH"
-if [ -z "$LAST" ]; then
-    bad "cannot fetch BTC-USDT ticker for the funds test"
-    FUNDS_PX="70000"
+if [ "$VENUE" = "okx" ]; then
+    # buy-side: qty 1 at ~0.99x last is inside the band and risk caps
+    # but far above the demo wallet -> venue 51008-style rejection.
+    if [ -z "$LAST" ]; then
+        bad "cannot fetch BTC-USDT ticker for the funds test"
+        FUNDS_PX="70000"
+    else
+        FUNDS_PX="$(python3 -c "print(int(float('$LAST') * $FUNDS_FACTOR))")"
+    fi
+    gw POST /orders "$(place_body "$(new_id F)" "$FUNDS_PX" "$FUNDS_QTY")"
+    assert_eq "insufficient funds -> 409" "409" "$STATUS"
+    assert_contains "venue_rejected error" "$BODY" '"code":"venue_rejected"'
 else
-    # above the demo/testnet wallet but inside the venue price band and
-    # the gateway risk caps (checked gateway-side first, then by the venue)
-    FUNDS_PX="$(python3 -c "print(int(float('$LAST') * $FUNDS_FACTOR))")"
+    # sell-side: market-sell more BTC than the wallet holds (free + the
+    # small overshoot) -> venue -2010 insufficient balance. A sell locks
+    # no quote ccy and the tight 0.002 position cap still passes while
+    # free BTC stays below ~0.0015; otherwise skip (the next full run
+    # sells the wallet back down and re-enables it).
+    FREE_BTC="$(python3 -c "print(f'{float('$START_BTC'):.8f}')" 2>/dev/null || echo 0)"
+    SELL_QTY="$(python3 -c "print(f'{float('$FREE_BTC') + $FUNDS_OVER:.5f}')")"
+    if python3 -c "exit(0 if float('$FREE_BTC') <= 0.0015 else 1)"; then
+        gw POST /orders '{"clientOrderId":"'"$(new_id F)"'","venue":"'"$VENUE"'","symbol":"BTC-USDT","side":"sell","type":"market","quantity":"'"$SELL_QTY"'"}'
+        assert_eq "insufficient BTC (sell-side) -> 409" "409" "$STATUS"
+        assert_contains "venue_rejected error" "$BODY" '"code":"venue_rejected"'
+    else
+        echo "  note: skipping sell-side funds test (free BTC $FREE_BTC > 0.0015;"
+        echo "        covered again once the wallet is below that - OKX run covers"
+        echo "        the funds path buy-side in the meantime)"
+    fi
 fi
-gw POST /orders "$(place_body "$(new_id F)" "$FUNDS_PX" "$FUNDS_QTY")"
-assert_eq "insufficient funds -> 409" "409" "$STATUS"
-assert_contains "venue_rejected error" "$BODY" '"code":"venue_rejected"'
 
 # ---- 14. real fill through the feed ---------------------------------------
 echo "== 14. aggressive limit buy fills on the venue =="
 if [ -z "$LAST" ]; then
     bad "cannot fetch BTC-USDT ticker for the aggressive-price test"
 else
-    AGGRESSIVE="$(python3 -c "print(int(float('$LAST') * 1.003) + 1)")"
-    echo "   last=$LAST -> aggressive px=$AGGRESSIVE (buy 0.00011, spends ~9 USDT of demo funds)"
+    AGGRESSIVE="$(python3 -c "print(int(float('$LAST') * $CROSS_FACTOR) + 1)")"
+    echo "   last=$LAST -> aggressive px=$AGGRESSIVE (buy $BASE_QTY, ~7 USDT of demo funds)"
     ID_C="$(new_id C)"
-    gw POST /orders "$(place_body "$ID_C" "$AGGRESSIVE" 0.00011)"
+    gw POST /orders "$(place_body "$ID_C" "$AGGRESSIVE" "$BASE_QTY")"
     assert_eq "marketable limit -> 201" "201" "$STATUS"
     [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
     if wait_state "$ID_C" filled 25; then
@@ -557,7 +668,7 @@ echo "== 14b. amend-to-cross-mid: 3 resting orders fill instantly =="
 if [ -z "$LAST" ]; then
     bad "skipping amend-to-cross test (no ticker, section 14 did not run)"
 else
-    CROSS="$(python3 -c "print(int(float('$LAST') * 1.003) + 1)")"
+    CROSS="$(python3 -c "print(int(float('$LAST') * $CROSS_FACTOR) + 1)")"
     echo "   last=$LAST -> crossing px=$CROSS (3 buys of $BASE_QTY)"
     ID_X1="$(new_id XA)"
     ID_X2="$(new_id XB)"
@@ -565,7 +676,7 @@ else
     ORD_X1="" ; ORD_X2="" ; ORD_X3=""
     for TAG in 1 2 3; do
         eval "ID=\$ID_X$TAG"
-        gw POST /orders "$(place_body "$ID" "$FAR_PX" "$BASE_QTY")"
+        gw POST /orders "$(place_body "$ID" "$REST_PX" "$BASE_QTY")"
         assert_eq "resting place $ID -> 201" "201" "$STATUS"
         [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
         eval "ORD_X$TAG=\"\$(json_field \"\$BODY\" exchangeOrderId)\""
@@ -613,44 +724,61 @@ fi
 
 # ---- 15. market order happy path -------------------------------------------
 echo "== 15. market order fills on the venue =="
-# Sells the BTC bought in section 14 (0.00011 minus the taker fee leaves
-# ~0.00010989 >= 0.0001). Both venues enforce a ~5 USDT minimum order
-# notional, so sell 0.0001 BTC (~8 USDT); market sell quantity is base
-# ccy on both venues.
-if [ -z "$LAST" ]; then
-    bad "skipping market-order test (no ticker, section 14 did not buy BTC)"
+# Sells the BTC bought in sections 14 + 14b back: the quantity is read
+# from the venue wallet (floored to the 0.00001 lot step, minimum the
+# venue's ~5 USDT notional floor, capped at SELL_MAX so an accumulated
+# demo wallet is never dumped — and maxQty can never trip) so the
+# account's BTC returns to ~dust after every run: repeated runs neither
+# accumulate BTC nor starve Binance's sell-side funds test of section
+# 13. Market sell quantity is base ccy on both venues.
+SELL_MAX="0.001"
+SELL_ALL_QTY=""
+if venue_balance "$WORK/balance_mid"; then
+    FREE_BTC_NOW="$(awk '{print $2}' "$WORK/balance_mid")"
+    SELL_ALL_QTY="$(python3 -c "
+free = float('$FREE_BTC_NOW')
+qty = min(int(free * 1e5) / 1e5, float('$SELL_MAX'))  # lot step + cap
+print(f'{qty:.5f}' if qty >= 0.0001 else '')")"
+    [ -n "$SELL_ALL_QTY" ] &&
+        echo "   wallet has $FREE_BTC_NOW BTC -> market selling $SELL_ALL_QTY (cap $SELL_MAX)" ||
+        echo "   wallet BTC $FREE_BTC_NOW below the ~5 USDT notional floor"
+fi
+if [ -z "$SELL_ALL_QTY" ]; then
+    # wallet query failed or dust: this run's buys (4 x BASE_QTY minus
+    # fees) still cover the historical fallback quantity
+    SELL_ALL_QTY="0.0003"
+    echo "   falling back to fixed market sell of $SELL_ALL_QTY BTC"
+fi
+ID_MKT="$(new_id K)"
+gw POST /orders '{"clientOrderId":"'"$ID_MKT"'","venue":"'"$VENUE"'","symbol":"BTC-USDT","side":"sell","type":"market","quantity":"'"$SELL_ALL_QTY"'"}'
+assert_eq "market sell -> 201" "201" "$STATUS"
+[ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
+if wait_state "$ID_MKT" filled 25; then
+    ok "market sell reached state filled at the venue"
+    gw GET "/orders/$ID_MKT"
+    assert_num_eq "market filledQuantity" "$SELL_ALL_QTY" "$(json_field "$BODY" filledQuantity)"
+    [ -n "$(json_field "$BODY" averageFillPrice)" ] &&
+        ok "market averageFillPrice=$(json_field "$BODY" averageFillPrice)" ||
+        bad "no averageFillPrice on market fill"
 else
-    ID_MKT="$(new_id K)"
-    gw POST /orders '{"clientOrderId":"'"$ID_MKT"'","venue":"'"$VENUE"'","symbol":"BTC-USDT","side":"sell","type":"market","quantity":"0.0001"}'
-    assert_eq "market sell -> 201" "201" "$STATUS"
-    [ "$STATUS" != "201" ] && echo "   venue reason: $(json_field "$BODY" reason)"
-    if wait_state "$ID_MKT" filled 25; then
-        ok "market sell reached state filled at the venue"
-        gw GET "/orders/$ID_MKT"
-        assert_num_eq "market filledQuantity" "0.0001" "$(json_field "$BODY" filledQuantity)"
-        [ -n "$(json_field "$BODY" averageFillPrice)" ] &&
-            ok "market averageFillPrice=$(json_field "$BODY" averageFillPrice)" ||
-            bad "no averageFillPrice on market fill"
-    else
-        bad "market sell did not fill within 25s (state=$STATE)"
-    fi
-    if wait_log "\"clientOrderId\":\"$ID_MKT\".*\"state\":\"filled\"" 25; then
-        ok "WS report (filled) reached the gateway log for the market order"
-    else
-        bad "no WS execution report for market order $ID_MKT"
-    fi
-    gw DELETE "/orders/$ID_MKT"
-    if [ "$STATUS" = "200" ] || [ "$STATUS" = "409" ]; then
-        ok "market order left terminal/canceled (DELETE -> $STATUS)"
-    else
-        bad "unexpected market cleanup status $STATUS"
-    fi
+    bad "market sell did not fill within 25s (state=$STATE)"
+fi
+if wait_log "\"clientOrderId\":\"$ID_MKT\".*\"state\":\"filled\"" 25; then
+    ok "WS report (filled) reached the gateway log for the market order"
+else
+    bad "no WS execution report for market order $ID_MKT"
+fi
+gw DELETE "/orders/$ID_MKT"
+if [ "$STATUS" = "200" ] || [ "$STATUS" = "409" ]; then
+    ok "market order left terminal/canceled (DELETE -> $STATUS)"
+else
+    bad "unexpected market cleanup status $STATUS"
 fi
 
 # ---- 16. persistence + restart recovery ------------------------------------
 echo "== 16. restart recovery from the event log =="
 ID_R="$(new_id R)"
-gw POST /orders "$(place_body "$ID_R" "$FAR_PX" "$BASE_QTY")"
+gw POST /orders "$(place_body "$ID_R" "$REST_PX" "$BASE_QTY")"
 assert_eq "place before restart -> 201" "201" "$STATUS"
 ORD_R="$(json_field "$BODY" exchangeOrderId)"
 stop_gateway
@@ -664,7 +792,7 @@ gw GET "/orders/$ID_R"
 assert_eq "order survived restart (from log)" "200" "$STATUS"
 assert_eq "same exchangeOrderId after restart" "$ORD_R" "$(json_field "$BODY" exchangeOrderId)"
 assert_eq "state live after restart" "live" "$(json_field "$BODY" state)"
-gw POST /orders "$(place_body "$ID_R" "$FAR_PX" "$BASE_QTY")"
+gw POST /orders "$(place_body "$ID_R" "$REST_PX" "$BASE_QTY")"
 assert_eq "place retry after restart -> 201 replayed" "201" "$STATUS"
 assert_eq "replayed=true across restart" "true" "$(json_flag "$BODY" replayed)"
 
@@ -672,7 +800,7 @@ assert_eq "replayed=true across restart" "true" "$(json_flag "$BODY" replayed)"
 echo "== 17. reconcile adopts an order placed directly on the venue =="
 ID_V="$(new_id V)"
 if [ "$VENUE" = "binance" ]; then
-    VENUE_PX="$(python3 -c "print(f'{float('$FAR_PX'):.2f}')")"
+    VENUE_PX="$(python3 -c "print(f'{float('$REST_PX'):.2f}')")"
     python3 - "$CONFIG_ARG" "$ID_V" "$VENUE_PX" <<'EOF' || bad "direct venue place failed (python helper)"
 import hashlib, hmac, json, sys, time, urllib.request, urllib.error
 cfg = json.load(open(sys.argv[1]))["binance"]
@@ -744,7 +872,7 @@ assert_eq "cleanup: cancel pre-restart order" "200" "$STATUS"
 # ---- 18. feed still alive at the end of the suite --------------------------
 echo "== 18. WS feed sustained connectivity (end of suite) =="
 ID_E="$(new_id E)"
-gw POST /orders "$(place_body "$ID_E" "$FAR_PX" "$BASE_QTY")"
+gw POST /orders "$(place_body "$ID_E" "$REST_PX" "$BASE_QTY")"
 assert_eq "final place -> 201" "201" "$STATUS"
 if wait_log "\"clientOrderId\":\"$ID_E\".*\"state\":\"live\"" 25; then
     ok "WS reports still flow at end of suite (keepalive held)"
@@ -822,7 +950,7 @@ for _ in $(seq 1 100); do
     sleep 0.2
 done
 T0="$SECONDS"
-gw_dead POST /orders "$(place_body "$(new_id D)" "$FAR_PX" 0.0001)"
+gw_dead POST /orders "$(place_body "$(new_id D)" "$REST_PX" 0.0001)"
 assert_eq "POST while venue unreachable -> 502" "502" "$STATUS"
 assert_contains "structured venue_unavailable error" "$BODY" '"code":"venue_unavailable"'
 ELAPSED=$((SECONDS - T0))
@@ -830,6 +958,35 @@ ELAPSED=$((SECONDS - T0))
     bad "took ${ELAPSED}s to fail (budget not honored?)"
 kill "$DEAD_GATEWAY_PID" 2>/dev/null
 DEAD_GATEWAY_PID=""
+
+# ---- budget guard: net demo-fund consumption of this run ------------------
+echo "== budget check (cap ${BUDGET_MAX_USDT} USDT, BTC valued at $BTC_USD) =="
+if venue_balance "$WORK/balance_end"; then
+    END_USDT="$(awk '{print $1}' "$WORK/balance_end")"
+    END_BTC="$(awk '{print $2}' "$WORK/balance_end")"
+    BUDGET_TOTAL="$(python3 - "$START_USDT" "$START_BTC" "$END_USDT" "$END_BTC" "$BTC_USD" <<'EOF'
+import sys
+start_usdt, start_btc, end_usdt, end_btc, btc_usd = map(float, sys.argv[1:6])
+usdt_spent = start_usdt - end_usdt
+btc_net = end_btc - start_btc
+print(f"{max(usdt_spent, 0.0) + btc_net * btc_usd:.2f}")
+EOF
+)"
+    python3 - "$START_USDT" "$START_BTC" "$END_USDT" "$END_BTC" "$BTC_USD" <<'EOF'
+import sys
+start_usdt, start_btc, end_usdt, end_btc, btc_usd = map(float, sys.argv[1:6])
+print(f"   USDT: {start_usdt:.2f} -> {end_usdt:.2f} (spent {start_usdt - end_usdt:.2f})")
+print(f"   BTC : {start_btc:.8f} -> {end_btc:.8f} (net {end_btc - start_btc:+.8f}"
+      f" = {abs(end_btc - start_btc) * btc_usd:.2f} USDT)")
+EOF
+    if python3 -c "exit(0 if float('$BUDGET_TOTAL') < $BUDGET_MAX_USDT else 1)"; then
+        ok "net consumption $BUDGET_TOTAL USDT < ${BUDGET_MAX_USDT} budget"
+    else
+        bad "net consumption $BUDGET_TOTAL USDT exceeds the ${BUDGET_MAX_USDT} budget"
+    fi
+else
+    bad "cannot re-read the $VENUE balance for the budget check"
+fi
 
 # ---- summary ----------------------------------------------------------------
 echo
