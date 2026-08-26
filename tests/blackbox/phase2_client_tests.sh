@@ -18,7 +18,7 @@
 #   8  cancel processed but ack dropped -> no re-send
 #   9  WS orders channel: execution reports land in the gateway log
 #   10 WS killed mid-stream -> reconnect + resubscribe -> updates flow again
-#   11 venue death -> 502 to the client -> venue reborn -> recovery
+#   11 venue death -> 502 (order stays pending) -> reconcile rejects venue_absent
 #
 # Usage: tests/blackbox/phase2_client_tests.sh   (expects curl + the built
 #        release binaries; builds them when missing)
@@ -298,15 +298,38 @@ else
 fi
 
 # ---- 11. venue death and recovery ------------------------------------------
-echo "== 11. venue death -> 502 -> venue reborn -> recovery =="
+# Since the Pending state (c2289cc): a place whose venue call fails on
+# transport keeps its born-Pending record (intent persisted, visible via
+# GET) and same-id retries replay 202 {state:pending} — the gateway never
+# re-sends an unacked place itself. The next WS-reconnect reconcile looks
+# the id up: conclusively absent (mock answers OKX 51603) -> terminal
+# Rejected venue_absent. A fresh clientOrderId places normally again.
+echo "== 11. venue death -> 502 -> pending replay -> reconcile rejects -> fresh id =="
 control /rest/stop >/dev/null
 gw POST /orders "$(place_body gwT11)"
 assert_eq "place -> 502 while venue is dead" "502" "$STATUS"
 assert_contains "structured error" "$BODY" '"code":"venue_unavailable"'
 control /rest/start >/dev/null
 gw POST /orders "$(place_body gwT11)"
-assert_eq "place -> 201 after venue recovery" "201" "$STATUS"
+assert_eq "same-id retry while unacked -> 202" "202" "$STATUS"
+assert_eq "unacked replay state is pending" "pending" "$(json_field "$BODY" state)"
+assert_eq "unacked replay carries no exchangeOrderId" "" "$(json_field "$BODY" exchangeOrderId)"
 gw GET "/orders/gwT11"
+assert_eq "order visible as pending after recovery" "pending" "$(json_field "$BODY" state)"
+# WS reconnect triggers the reconcile that resolves the never-delivered order
+control /ws/kill >/dev/null
+ST="pending"
+for _ in $(seq 1 100); do
+    gw GET "/orders/gwT11"
+    ST="$(json_field "$BODY" state)"
+    [ "$ST" = "rejected" ] && break
+    sleep 0.1
+done
+assert_eq "reconcile resolves venue-absent order to rejected" "rejected" "$ST"
+assert_contains "rejection reason is venue_absent" "$BODY" '"code":"venue_absent"'
+gw POST /orders "$(place_body gwT11b)"
+assert_eq "fresh id -> 201 after venue recovery" "201" "$STATUS"
+gw GET "/orders/gwT11b"
 assert_eq "order is live after recovery" "live" "$(json_field "$BODY" state)"
 
 # ---- 12. amend via PUT -------------------------------------------------------

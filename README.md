@@ -23,7 +23,7 @@ docker compose exec dev cmake --build --preset release
 docker compose restart gateway && docker compose logs -f gateway        # Ctrl-C to detach
 
 # 4) launch the test suite against a real HTTP gateway
-docker compose exec dev bash tests/blackbox/phase2_client_tests.sh     # 44 assertions, ~1 min
+docker compose exec dev bash tests/blackbox/phase2_client_tests.sh     # 50 assertions, ~1 min
 Notes:
 - Step 4 (blackbox) spawns its own gateway instance on a free port against a mock venue — it never touches the compose gateway service, so you can run it even while the live one is up.
 - The unit suites (docker compose exec dev ctest --preset release, or --preset debug for ASan+UBSan) are in-process and don't need a running API.
@@ -178,7 +178,7 @@ withdrawals disabled (true for both OKX demo and Binance testnet keys).
   official API docs (`tests/mocks/`): fault injection covers dropped
   requests, lost acks (outcome unknown), delayed responses, duplicate and
   dropped reports, WS kills and endpoint death/restart.
-- Black-box client rig (`tests/blackbox/`, 44 assertions) drives the real
+- Black-box client rig (`tests/blackbox/`, 50 assertions) drives the real
   gateway binary over HTTP against a standalone fake OKX venue.
 - Live venue suites (`tests/live/live_func_tests.sh okx|binance`,
   85 assertions per venue, no mocks) and runbook
@@ -258,7 +258,7 @@ examples/place_and_cancel.sh                 # single-venue variant
 Black-box client suite against the real binary + fake venue:
 
 ```bash
-tests/blackbox/run_docker_client.sh          # 44 assertions, ~10 seconds
+tests/blackbox/run_docker_client.sh          # 50 assertions, ~10 seconds
 ```
 
 Live venue suites (need real demo/testnet credentials in the config):

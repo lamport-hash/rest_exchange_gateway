@@ -176,4 +176,4 @@ docker compose exec dev ctest --preset debug && docker compose exec dev ctest --
 
 Verification state (2026-08-21): live suites 85/85 per venue (OKX demo,
 Binance spot testnet), `ctest` 21/21 suites in both presets (debug =
-ASan+UBSan), black-box rig 44/44.
+ASan+UBSan), black-box rig 50/50.
