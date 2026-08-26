@@ -89,3 +89,6 @@ config/*.local.json
 
 # runtime gateway output (default persistence path)
 data/
+
+# delivery packaging output (tools/package_delivery.sh)
+dist/
