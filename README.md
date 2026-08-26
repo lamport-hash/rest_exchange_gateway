@@ -10,6 +10,25 @@ Plan: `doc/implementation-plan.md` / `implement-todos.md`.
 API reference + diagrams: `doc/api.md` — code review vs spec:
 `doc/code-review.md` — remaining work: `doc/feature-backlog.md`.
 
+## compile, run and run tests:
+
+# 1) compile the REST API (gateway binary, release)
+docker compose exec dev cmake --preset release                                # first time only
+docker compose exec dev cmake --build --preset release --target gateway
+
+# 2) compile the tests (all suite binaries, same build tree)
+docker compose exec dev cmake --build --preset release
+
+# 3) launch the API (compose service rebuilds-if-needed then execs the fresh binary)
+docker compose restart gateway && docker compose logs -f gateway        # Ctrl-C to detach
+
+# 4) launch the test suite against a real HTTP gateway
+docker compose exec dev bash tests/blackbox/phase2_client_tests.sh     # 44 assertions, ~1 min
+Notes:
+- Step 4 (blackbox) spawns its own gateway instance on a free port against a mock venue — it never touches the compose gateway service, so you can run it even while the live one is up.
+- The unit suites (docker compose exec dev ctest --preset release, or --preset debug for ASan+UBSan) are in-process and don't need a running API.
+- To drive the live API by hand instead: docker compose exec dev curl http://127.0.0.1:8080/health.
+
 ## Architecture
 
 ```
