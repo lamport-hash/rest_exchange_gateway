@@ -22,7 +22,6 @@
     <button class="tab" data-tab="risk">Risk</button>
     <button class="tab" data-tab="diagrams">Diagrams</button>
     <button class="tab" data-tab="orderflow">Order flow</button>
-    <button class="tab" data-tab="tests">Tests</button>
   </nav>
 
   <!-- =============================================================== monitor -->
@@ -346,20 +345,19 @@ curl -s localhost:8080/health</pre>
       <div class="section-head">
         <h2>Spec 3.1 — Supported Order Flow</h2>
         <span class="muted">doc/project-spec.md — requirements vs implementation vs tests</span>
-        <span id="orderflow-status" class="badge unknown">–</span>
       </div>
       <table id="orderflow-table">
         <thead>
           <tr>
             <th>requirement</th><th>implementation</th><th>tests</th>
-            <th class="col-outcome">status</th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
       <div class="table-note muted">
-        chips show the latest outcome of each covering suite (debug / release presets, blackbox, live);
-        run them from the Tests tab — the status column re-evaluates on every poll
+        chips name the covering suites (ctest suites, blackbox, live venue ids) —
+        run them from the repo: cmake --preset &lt;preset&gt; &amp;&amp; ctest --preset &lt;preset&gt;,
+        tests/blackbox, tests/live
       </div>
     </section>
 
@@ -388,30 +386,6 @@ curl -s localhost:8080/health</pre>
         <tbody></tbody>
       </table>
       <div id="statemap-note" class="table-note muted"></div>
-    </section>
-  </div>
-
-  <!-- ================================================================== tests -->
-  <div id="tab-tests" class="tab-panel">
-    <section>
-      <div class="section-head">
-        <h2>Tests</h2>
-        <div class="runall">
-          <button data-group="debug">Run all (debug)</button>
-          <button data-group="release">Run all (release)</button>
-          <button data-group="blackbox">Run blackbox</button>
-        </div>
-      </div>
-      <table id="tests-table">
-        <thead>
-          <tr>
-            <th></th><th>suite</th><th>preset</th><th>type</th>
-            <th>spec coverage</th><th class="col-outcome">outcome</th>
-            <th>duration</th><th>log</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
     </section>
   </div>
 

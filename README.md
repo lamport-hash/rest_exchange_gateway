@@ -250,7 +250,7 @@ tests/live/live_func_tests.sh binance        # Binance spot testnet
                                              # runbook: doc/exchanges_func.md
 ```
 
-## Monitor UI + test launcher (compose apps)
+## Monitor UI (compose apps)
 
 Besides the `dev` container, compose runs the gateway and a small web UI as
 apps sharing the same image, source tree, and build volume:
@@ -292,20 +292,14 @@ docker compose up -d                         # dev + gateway + ui + edge
   recent `risk_*` rejections with their recorded reasons from the order
   registry), **Diagrams** (architecture, order
   state machine, place idempotency and restart-recovery mermaid diagrams,
-  rendered offline from a vendored `mermaid.min.js`), **Order flow** (spec
-  §3.1 traceability: every requirement — new order market/limit, cancel,
-  amend, the five normalized states, the explicit client↔venue mapping —
-  with its implementation refs (`file:line`) and covering suites, each
-  chip showing that suite's latest outcome from the run history and the
-  row status rolling them up into covered / failing / not run; plus the
-  explicit client-concept → OKX/Binance semantics tables for order flow
-  and execution states), and **Tests** — all
-  21 ctest suites in both presets (debug = ASan+UBSan), the black-box
-  rig, and the live venue suites, each with a Run button, live log tail,
-  parsed outcome summary and duration. Tests execute in the UI container,
-  one at a time (the suites claim fixed ports); live rows ask for
-  confirmation because they spend demo/testnet funds. Run history
-  persists under `data/ui-runs/`.
+  rendered offline from a vendored `mermaid.min.js`), and **Order flow**
+  (spec §3.1 traceability: every requirement — new order market/limit,
+  cancel, amend, the normalized states, the explicit client↔venue
+  mapping — with its implementation refs (`file:line`) and covering
+  suites as static chips; plus the explicit client-concept →
+  OKX/Binance semantics tables for order flow and execution states).
+  Test suites run from the repo, not the UI: `cmake --preset <preset> &&
+  ctest --preset <preset>`, `tests/blackbox/`, `tests/live/`.
 
 Stop everything (named volumes `build/` and `ccache/` are kept):
 

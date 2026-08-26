@@ -1,9 +1,6 @@
 "use strict";
 
 const state = {
-  tests: [],
-  runsByTest: {},   // test_id -> latest run record
-  openLogs: new Set(), // test ids whose log row is expanded
   orders: [],
   lastOrdersOk: false,
   priceSymbol: "BTC-USDT",
@@ -69,13 +66,6 @@ function initPriceControls() {
 }
 
 /* ---------------------------------------------------------------- panels -- */
-
-function fmtDuration(seconds) {
-  if (seconds == null) return "";
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const m = Math.floor(seconds / 60);
-  return `${m}m${Math.round(seconds % 60)}s`;
-}
 
 function renderGateway(data) {
   const badge = $("#gateway-badge");
@@ -493,40 +483,11 @@ function renderRejections() {
 
 /* ------------------------------------------------------------- order flow -- */
 
-// Catalog entries covering one suite name from the spec matrix: unit
-// suites match by name in both presets, special suites by id.
-function suiteCandidates(name) {
-  return state.tests.filter((t) => t.name === name || t.id === name);
-}
-
-function suiteChip(t) {
-  const run = state.runsByTest[t.id];
-  const chip = document.createElement("span");
-  const label = t.kind === "unit" ? t.preset : t.id;
-  chip.className = `suite-chip ${runClass(run)}`;
-  chip.textContent = run ? `${label} ${run.status === "passed" ? "✓" : run.status === "failed" ? "✗" : ""}`.trim()
-    : label;
-  chip.title = t.id;
-  return chip;
-}
-
-function requirementStatus(candidates) {
-  const runs = candidates.map((t) => state.runsByTest[t.id]).filter(Boolean);
-  if (!runs.length) return { text: "not run", cls: "unknown" };
-  const statuses = runs.map((r) => r.status);
-  if (statuses.includes("failed")) return { text: "failing", cls: "bad" };
-  if (statuses.includes("timeout")) return { text: "unstable", cls: "warn" };
-  if (statuses.every((s) => s === "passed")) return { text: "covered", cls: "ok" };
-  return { text: "running…", cls: "unknown" };
-}
-
 function renderOrderFlow() {
   const tbody = $("#orderflow-table tbody");
   if (!tbody || !state.orderFlow || state.orderFlow.error) return;
   const spec = state.orderFlow;
   tbody.innerHTML = "";
-  let failing = 0;
-  let covered = 0;
   for (const req of spec.requirements) {
     const tr = document.createElement("tr");
 
@@ -555,30 +516,18 @@ function renderOrderFlow() {
     const testsTd = document.createElement("td");
     const chips = document.createElement("div");
     chips.className = "suite-chips";
-    const candidates = req.tests.flatMap(suiteCandidates);
-    for (const t of candidates) chips.appendChild(suiteChip(t));
-    if (!candidates.length) chips.textContent = "–";
+    for (const name of req.tests) {
+      const chip = document.createElement("span");
+      chip.className = "suite-chip";
+      chip.textContent = name;
+      chips.appendChild(chip);
+    }
+    if (!req.tests.length) chips.textContent = "–";
     testsTd.appendChild(chips);
     tr.appendChild(testsTd);
 
-    const status = requirementStatus(candidates);
-    if (status.cls === "bad") failing += 1;
-    if (status.cls === "ok") covered += 1;
-    const statusTd = document.createElement("td");
-    statusTd.className = "col-outcome";
-    const badge = document.createElement("span");
-    badge.className = `badge ${status.cls}`;
-    badge.textContent = status.text;
-    statusTd.appendChild(badge);
-    tr.appendChild(statusTd);
-
     tbody.appendChild(tr);
   }
-  const badge = $("#orderflow-status");
-  badge.textContent = failing ? `${failing} requirement(s) failing`
-    : covered ? `${covered}/${spec.requirements.length} covered`
-    : "no suites run";
-  badge.className = `badge ${failing ? "bad" : covered ? "ok" : "unknown"}`;
 
   const flowTbody = $("#flowmap-table tbody");
   flowTbody.innerHTML = "";
@@ -667,189 +616,12 @@ async function renderDiagrams() {
   }
 }
 
-/* ----------------------------------------------------------------- tests -- */
-
-function runClass(run) {
-  if (!run) return "";
-  if (run.status === "passed" || run.status === "failed") return run.status;
-  return run.status; // queued | running | timeout
-}
-
-function renderTests() {
-  const tbody = $("#tests-table tbody");
-  tbody.innerHTML = "";
-  const groups = [
-    { key: "unit-debug", label: "unit tests — debug preset (ASan+UBSan)", match: (t) => t.kind === "unit" && t.preset === "debug" },
-    { key: "unit-release", label: "unit tests — release preset", match: (t) => t.kind === "unit" && t.preset === "release" },
-    { key: "blackbox", label: "black-box (mock venue, deterministic)", match: (t) => t.kind === "blackbox" },
-    { key: "live", label: "live venues (real demo/testnet funds — confirm required)", match: (t) => t.kind === "live" },
-  ];
-  for (const group of groups) {
-    const tests = state.tests.filter(group.match);
-    if (!tests.length) continue;
-    const head = document.createElement("tr");
-    head.className = "kind-group";
-    head.innerHTML = `<td colspan="8">${group.label}</td>`;
-    tbody.appendChild(head);
-    for (const t of tests) {
-      tbody.appendChild(renderTestRow(t));
-      if (state.openLogs.has(t.id)) {
-        tbody.appendChild(renderLogRow(t));
-      }
-    }
-  }
-}
-
-function renderTestRow(t) {
-  const run = state.runsByTest[t.id];
-  const tr = document.createElement("tr");
-  tr.dataset.testId = t.id;
-
-  const runTd = document.createElement("td");
-  const btn = document.createElement("button");
-  btn.className = "run";
-  btn.textContent = "▶ run";
-  const busy = run && (run.status === "running" || run.status === "queued");
-  btn.disabled = Boolean(busy);
-  btn.onclick = () => launch(t);
-  runTd.appendChild(btn);
-  tr.appendChild(runTd);
-
-  const nameTd = document.createElement("td");
-  nameTd.className = "mono";
-  nameTd.textContent = t.name;
-  tr.appendChild(nameTd);
-
-  const presetTd = document.createElement("td");
-  presetTd.textContent = t.preset || "–";
-  tr.appendChild(presetTd);
-
-  const kindTd = document.createElement("td");
-  kindTd.textContent = t.kind;
-  tr.appendChild(kindTd);
-
-  const descTd = document.createElement("td");
-  descTd.className = "muted";
-  descTd.textContent = t.description;
-  tr.appendChild(descTd);
-
-  const outTd = document.createElement("td");
-  outTd.className = "col-outcome";
-  if (run) {
-    const span = document.createElement("span");
-    span.className = `outcome ${runClass(run)}`;
-    span.textContent = run.status;
-    outTd.appendChild(span);
-    if (run.summary) {
-      const s = document.createElement("div");
-      s.className = "summary";
-      s.textContent = run.summary;
-      outTd.appendChild(s);
-    }
-  } else {
-    outTd.innerHTML = '<span class="muted">never run</span>';
-  }
-  tr.appendChild(outTd);
-
-  const durTd = document.createElement("td");
-  if (run && run.finished_at) {
-    durTd.textContent = fmtDuration(run.finished_at - run.started_at);
-  } else if (run && run.status === "running") {
-    durTd.textContent = fmtDuration((Date.now() / 1000) - run.started_at) + "…";
-  }
-  tr.appendChild(durTd);
-
-  const logTd = document.createElement("td");
-  const logBtn = document.createElement("button");
-  logBtn.textContent = state.openLogs.has(t.id) ? "hide" : "log";
-  logBtn.disabled = !run;
-  logBtn.onclick = () => {
-    if (state.openLogs.has(t.id)) state.openLogs.delete(t.id);
-    else state.openLogs.add(t.id);
-    renderTests();
-  };
-  logTd.appendChild(logBtn);
-  tr.appendChild(logTd);
-
-  return tr;
-}
-
-function renderLogRow(t) {
-  const tr = document.createElement("tr");
-  tr.className = "log-row";
-  const td = document.createElement("td");
-  td.colSpan = 8;
-  const pre = document.createElement("pre");
-  pre.className = "log";
-  pre.dataset.testId = t.id;
-  pre.textContent = "loading…";
-  td.appendChild(pre);
-  tr.appendChild(td);
-  refreshLog(t.id, pre);
-  return tr;
-}
-
-async function refreshLog(testId, pre) {
-  const run = state.runsByTest[testId];
-  if (!run) return;
-  try {
-    const data = await fetchJson(`/api/runs/${run.id}/log?tail=12000`);
-    pre.textContent = data.log || "(empty)";
-    pre.scrollTop = pre.scrollHeight;
-  } catch {
-    pre.textContent = "(no log yet)";
-  }
-}
-
-async function launch(t) {
-  if (t.needs_confirm) {
-    const ok = confirm(
-      `${t.name}\n\nThis runs against the REAL venue and spends small demo/testnet funds.\n` +
-      "It needs internet access and valid credentials in config/gateway.json.secret.\n\nProceed?"
-    );
-    if (!ok) return;
-  }
-  try {
-    const data = await fetchJson(`/api/tests/${encodeURIComponent(t.id)}/run`, { method: "POST" });
-    if (data.run_id) {
-      state.runsByTest[t.id] = {
-        id: data.run_id, test_id: t.id, status: "queued",
-        started_at: Date.now() / 1000, finished_at: null, summary: null,
-      };
-      renderTests();
-    } else if (data.detail) {
-      alert(`cannot start: ${data.detail}`);
-    }
-  } catch (e) {
-    alert(`cannot start: ${e}`);
-  }
-}
-
 /* ---------------------------------------------------------------- refresh -- */
-
-async function refreshRuns() {
-  const data = await fetchJson("/api/runs");
-  const byTest = {};
-  for (const run of data.runs || []) {
-    const prev = byTest[run.test_id];
-    if (!prev || Number(run.id) > Number(prev.id)) byTest[run.test_id] = run;
-  }
-  state.runsByTest = byTest;
-  renderTests();
-  // keep live logs scrolling while their test runs
-  document.querySelectorAll("pre.log").forEach((pre) => {
-    const run = state.runsByTest[pre.dataset.testId];
-    if (run && (run.status === "running" || run.status === "queued")) {
-      refreshLog(pre.dataset.testId, pre);
-    }
-  });
-}
 
 async function refreshAll() {
   try { renderGateway(await fetchJson("/api/gateway/status")); } catch { /* gateway down */ }
   try { renderOrders(await fetchJson("/api/orders")); } catch { /* ignore */ }
   try { renderRisk(await fetchJson("/api/risk")); } catch { /* ignore */ }
-  try { await refreshRuns(); } catch { /* ignore */ }
   try { await ensureOrderFlowSpec(); renderOrderFlow(); } catch { /* ignore */ }
   try { await refreshPrice(); } catch { /* ignore */ }
 }
@@ -859,20 +631,6 @@ async function init() {
   initPriceControls();
   initBalanceControls();
   renderEndpoints();
-  const data = await fetchJson("/api/tests");
-  state.tests = data.tests || [];
-  document.querySelectorAll(".runall button").forEach((btn) => {
-    btn.onclick = async () => {
-      const group = btn.dataset.group;
-      const targets = state.tests.filter((t) =>
-        group === "blackbox" ? t.kind === "blackbox" : t.preset === group);
-      for (const t of targets) {
-        if (t.needs_confirm) continue; // live suites stay explicit
-        await fetchJson(`/api/tests/${encodeURIComponent(t.id)}/run`, { method: "POST" });
-      }
-      await refreshRuns();
-    };
-  });
   await refreshAll();
   setInterval(refreshAll, 2000);
 }
