@@ -59,6 +59,7 @@ add_library(gateway_core STATIC
     src/core/config.cpp
     src/core/decimal.cpp
     src/core/event_log.cpp
+    src/core/latency.cpp
     src/core/oms.cpp
     src/core/retry.cpp
     src/core/risk.cpp
@@ -139,6 +140,11 @@ if(GATEWAY_BUILD_TESTS)
     add_executable(oms_test tests/oms_test.cpp)
     target_link_libraries(oms_test PRIVATE gateway_core)
     add_test(NAME oms_test COMMAND oms_test)
+
+    add_executable(latency_test tests/latency_test.cpp)
+    target_include_directories(latency_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(latency_test PRIVATE gateway_test_support gateway_rest)
+    add_test(NAME latency_test COMMAND latency_test)
 
     add_executable(clock_test tests/clock_test.cpp)
     target_link_libraries(clock_test PRIVATE gateway_core)

@@ -195,6 +195,32 @@ TEST_CASE("load_config rejects malformed audit sections")
     CHECK_FALSE(gateway::load_config(not_object.path()).is_ok());
 }
 
+TEST_CASE("load_config parses the optional latency log section")
+{
+    const TempConfigFile with{R"({"latency": {"logPath": "data/latency.jsonl"}})"};
+    const auto parsed = gateway::load_config(with.path());
+    REQUIRE(parsed.is_ok());
+    REQUIRE(parsed.value().latency_log.has_value());
+    CHECK(parsed.value().latency_log->string() == "data/latency.jsonl");
+
+    const TempConfigFile without{R"({"okx": {}})"};
+    const auto defaults = gateway::load_config(without.path());
+    REQUIRE(defaults.is_ok());
+    CHECK_FALSE(defaults.value().latency_log.has_value());
+}
+
+TEST_CASE("load_config rejects malformed latency sections")
+{
+    const TempConfigFile not_object{R"({"latency": "data/latency.jsonl"})"};
+    CHECK_FALSE(gateway::load_config(not_object.path()).is_ok());
+
+    const TempConfigFile missing_path{R"({"latency": {}})"};
+    CHECK_FALSE(gateway::load_config(missing_path.path()).is_ok());
+
+    const TempConfigFile wrong_type{R"({"latency": {"logPath": 5}})"};
+    CHECK_FALSE(gateway::load_config(wrong_type.path()).is_ok());
+}
+
 TEST_CASE("okx_config_from_json accepts a complete section")
 {
     const auto section = nlohmann::json::parse(R"({

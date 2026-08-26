@@ -19,6 +19,9 @@ struct GatewayConfig
     /// Append-only order event log; std::nullopt disables persistence
     /// (recovery then relies entirely on venue reconciliation).
     std::optional<std::filesystem::path> persistence_log;
+    /// Append-only latency measurement log; std::nullopt disables
+    /// latency tracking.
+    std::optional<std::filesystem::path> latency_log;
     /// Pre-trade risk limits; empty = unlimited (warned at startup).
     RiskConfig risk;
     /// Venue used when a client order omits the venue field.

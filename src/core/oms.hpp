@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/event_log.hpp"
+#include "core/latency.hpp"
 #include "core/order_state.hpp"
 #include "core/risk.hpp"
 #include "gateway/exchange_connector.hpp"
@@ -188,9 +189,12 @@ class OrderManagementSystem
     /// names, e.g. {"okx", &okx}, {"binance", &binance}); must not be
     /// empty. a_default_venue is used when a place request carries no
     /// venue. a_log may be nullptr (persistence disabled; recovery then
-    /// relies entirely on venue reconciliation).
+    /// relies entirely on venue reconciliation). a_latency may be nullptr
+    /// (latency tracking disabled); when set, place-send and
+    /// fill-to-state-update measurements are appended to it.
     OrderManagementSystem(std::map<std::string, ExchangeConnector*> a_connectors, EventLog* a_log,
-                          RiskConfig a_risk, std::string a_default_venue = "okx");
+                          RiskConfig a_risk, std::string a_default_venue = "okx",
+                          LatencyLog* a_latency = nullptr);
 
     OrderManagementSystem(const OrderManagementSystem&) = delete;
     auto operator=(const OrderManagementSystem&) -> OrderManagementSystem& = delete;
@@ -201,7 +205,18 @@ class OrderManagementSystem
     /// Default venue key (used when a request omits the venue).
     [[nodiscard]] auto default_venue() const -> std::string;
 
-    /// Place a new order on a_venue (empty -> default venue). Paths:
+    /// Read the shared latency clock (monotonic nanoseconds); returns
+    /// kNoLatencyStamp when tracking is disabled. The REST layer uses
+    /// this to stamp the request on handler entry and hand the value to
+    /// place().
+    [[nodiscard]] auto latency_now() const -> std::int64_t;
+
+    /// Place a new order on a_venue (empty -> default venue).
+    /// a_rest_hit_ns: REST-handler-entry timestamp from
+    /// latency_now() (kNoLatencyStamp when the caller has none, e.g.
+    /// internal/recovery paths); with tracking enabled the
+    /// place-send measurements are logged just before the venue call.
+    /// Paths:
     /// - known clientOrderId: replayed outcome (record + replayed=true),
     ///   or the recorded rejection as an error. A still-unacked entry
     ///   (Pending — its venue call is in flight, or a previous attempt
@@ -218,8 +233,8 @@ class OrderManagementSystem
     ///   order is NOT sent ("persistence" error, nothing recorded); after
     ///   venue acceptance a persistence failure is reported but the
     ///   outcome is recorded anyway (client retry replays it)
-    [[nodiscard]] auto place(const OrderRequest& a_request,
-                             std::string_view a_venue = {}) -> Result<PlaceOutcome>;
+    [[nodiscard]] auto place(const OrderRequest& a_request, std::string_view a_venue = {},
+                             std::int64_t a_rest_hit_ns = kNoLatencyStamp) -> Result<PlaceOutcome>;
 
     /// Cancel; idempotent (already-canceled returns the record).
     /// Errors: "not_found", "order_pending" (venue has not acked yet —
@@ -383,6 +398,8 @@ class OrderManagementSystem
     std::map<std::string, ExchangeConnector*> connectors_;
     std::string default_venue_;
     EventLog* log_;
+    /// Optional latency measurement sink (nullptr = disabled).
+    LatencyLog* latency_;
     RiskConfig risk_;
     mutable std::mutex mutex_;
     /// The registry: every known clientOrderId. Pending entries are

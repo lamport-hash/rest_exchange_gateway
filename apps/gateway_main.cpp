@@ -1,6 +1,7 @@
 #include "core/clock.hpp"
 #include "core/config.hpp"
 #include "core/event_log.hpp"
+#include "core/latency.hpp"
 #include "core/oms.hpp"
 #include "exchange/binance/binance_config.hpp"
 #include "exchange/binance/binance_connector.hpp"
@@ -138,9 +139,20 @@ auto main(int a_argc, char* a_argv[]) -> int
         std::cerr << "warning: no risk limits configured; pre-trade checks are disabled\n";
     }
 
-    gateway::OrderManagementSystem oms{connectors,
-                                       event_log.has_value() ? &event_log.value() : nullptr,
-                                       config.value().risk, default_venue};
+    // latency log (optional): parent directory must exist
+    std::optional<gateway::LatencyLog> latency_log;
+    if (config.value().latency_log.has_value()) {
+        const auto parent = config.value().latency_log->parent_path();
+        if (!parent.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(parent, ec); // best effort
+        }
+        latency_log.emplace(*config.value().latency_log);
+    }
+
+    gateway::OrderManagementSystem oms{
+        connectors, event_log.has_value() ? &event_log.value() : nullptr, config.value().risk,
+        default_venue, latency_log.has_value() ? &latency_log.value() : nullptr};
 
     // startup recovery: replay the local log before serving traffic
     const auto replayed = oms.load_from_log();

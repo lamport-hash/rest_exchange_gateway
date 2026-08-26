@@ -50,6 +50,15 @@ auto load_config(const std::filesystem::path& a_path) -> Result<GatewayConfig>
         config.persistence_log = persistence.at("logPath").get<std::string>();
     }
 
+    if (root.contains("latency")) {
+        const auto& latency = root.at("latency");
+        if (!latency.is_object() || !latency.contains("logPath") ||
+            !latency.at("logPath").is_string()) {
+            return Error{"protocol", "latency section must be an object with string \"logPath\""};
+        }
+        config.latency_log = latency.at("logPath").get<std::string>();
+    }
+
     if (root.contains("risk")) {
         const auto risk = risk_config_from_json(root.at("risk"));
         if (!risk.is_ok()) {

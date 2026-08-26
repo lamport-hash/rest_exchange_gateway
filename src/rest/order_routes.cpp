@@ -130,6 +130,10 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                     return json_response(200, {{"orders", std::move(orders)}});
                 }
 
+                // Latency stamp taken at handler entry (before parse and
+                // validation): the "REST hit" of the place-send measurement.
+                const std::int64_t rest_hit_ns = a_oms.latency_now();
+
                 crow::response parse_error;
                 const auto body = parse_json_body(a_req, parse_error);
                 if (!body.has_value()) {
@@ -232,7 +236,7 @@ void register_order_routes(crow::SimpleApp& a_app, OrderManagementSystem& a_oms)
                                           request.client_order_id);
                 }
 
-                const auto outcome = a_oms.place(request, venue);
+                const auto outcome = a_oms.place(request, venue, rest_hit_ns);
                 if (!outcome.is_ok()) {
                     return map_error(outcome.error(), request.client_order_id);
                 }

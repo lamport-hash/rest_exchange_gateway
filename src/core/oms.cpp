@@ -153,9 +153,9 @@ auto state_event(const OrderRecord& a_record) -> nlohmann::json
 
 OrderManagementSystem::OrderManagementSystem(std::map<std::string, ExchangeConnector*> a_connectors,
                                              EventLog* a_log, RiskConfig a_risk,
-                                             std::string a_default_venue)
+                                             std::string a_default_venue, LatencyLog* a_latency)
     : connectors_(std::move(a_connectors)), default_venue_(std::move(a_default_venue)), log_(a_log),
-      risk_(std::move(a_risk))
+      latency_(a_latency), risk_(std::move(a_risk))
 {}
 
 auto OrderManagementSystem::connector_for(const std::string& a_venue) const -> ExchangeConnector*
@@ -185,6 +185,11 @@ auto OrderManagementSystem::venues() const -> std::vector<std::string>
 auto OrderManagementSystem::default_venue() const -> std::string
 {
     return default_venue_;
+}
+
+auto OrderManagementSystem::latency_now() const -> std::int64_t
+{
+    return latency_ != nullptr ? latency_->now() : kNoLatencyStamp;
 }
 
 auto OrderManagementSystem::lookup(std::string_view a_client_order_id)
@@ -280,9 +285,10 @@ auto OrderManagementSystem::projected_position(const std::string& a_symbol,
     return decimal_to_string(projected);
 }
 
-auto OrderManagementSystem::place(const OrderRequest& a_request,
-                                  std::string_view a_venue) -> Result<PlaceOutcome>
+auto OrderManagementSystem::place(const OrderRequest& a_request, std::string_view a_venue,
+                                  std::int64_t a_rest_hit_ns) -> Result<PlaceOutcome>
 {
+    const std::int64_t oms_entry_ns = latency_ != nullptr ? latency_->now() : kNoLatencyStamp;
     std::string venue{a_venue.empty() ? default_venue_ : std::string{a_venue}};
 
     ExchangeConnector* connector = nullptr;
@@ -361,6 +367,19 @@ auto OrderManagementSystem::place(const OrderRequest& a_request,
     // ---- venue routing (NO lock: a venue feed thread applying execution
     // reports must never wait behind venue I/O — on WS-API venues the
     // same connection carries this very response) ----
+    if (latency_ != nullptr) {
+        // Place-send latency, stamped just before the venue call:
+        // - place_send_rest: REST handler entry (includes parse/risk/
+        //   staging) — only when the REST layer stamped the hit
+        // - place_send_oms: OMS place() entry (registry/risk/staging)
+        const std::int64_t send_ns = latency_->now();
+        if (a_rest_hit_ns != kNoLatencyStamp) {
+            latency_->measure(a_request.client_order_id, "place_send_rest", a_rest_hit_ns, send_ns);
+        }
+        if (oms_entry_ns != kNoLatencyStamp) {
+            latency_->measure(a_request.client_order_id, "place_send_oms", oms_entry_ns, send_ns);
+        }
+    }
     const auto placement = connector->place_order(a_request);
 
     { // ---- critical section 2: apply the outcome, drain raced reports ----
@@ -814,6 +833,7 @@ void OrderManagementSystem::apply_arbitrated_report(OrderRecord& a_record,
 void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
 {
     const std::lock_guard lock(mutex_);
+    const std::int64_t received_ns = latency_ != nullptr ? latency_->now() : kNoLatencyStamp;
     // A place or amend whose venue outcome has not landed yet: buffer the
     // report so it applies (and persists) right after that outcome, in
     // replay-correct order (place_submitted -> place_accepted -> state;
@@ -829,7 +849,16 @@ void OrderManagementSystem::on_execution_report(const ExecutionReport& a_report)
         ++stats_.reports_unknown;
         return;
     }
+    const auto applied_before = stats_.reports_applied;
     apply_arbitrated_report(it->second, a_report);
+    // Fill-to-state-update latency, measured only when the report really
+    // moved the registry (duplicates/stale reports updated nothing and
+    // buffered ones resolve on their place/amend path). The end stamp is
+    // taken after the state event was persisted inside apply_report.
+    if (latency_ != nullptr && stats_.reports_applied > applied_before) {
+        latency_->measure(a_report.client_order_id, "fill_state_update", received_ns,
+                          latency_->now());
+    }
 }
 
 void OrderManagementSystem::record_from_snapshot(const OrderSnapshot& a_snapshot,
