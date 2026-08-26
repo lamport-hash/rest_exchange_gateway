@@ -10,63 +10,6 @@ namespace gateway {
 
 namespace {
 
-auto side_to_string(Side a_side) -> std::string_view
-{
-    return a_side == Side::Buy ? "buy" : "sell";
-}
-
-auto parse_side(std::string_view a_text) -> std::optional<Side>
-{
-    if (a_text == "buy") {
-        return Side::Buy;
-    }
-    if (a_text == "sell") {
-        return Side::Sell;
-    }
-    return std::nullopt;
-}
-
-auto type_to_string(OrderType a_type) -> std::string_view
-{
-    return a_type == OrderType::Limit ? "limit" : "market";
-}
-
-auto parse_type(std::string_view a_text) -> std::optional<OrderType>
-{
-    if (a_text == "limit") {
-        return OrderType::Limit;
-    }
-    if (a_text == "market") {
-        return OrderType::Market;
-    }
-    return std::nullopt;
-}
-
-auto state_to_string(OrderState a_state) -> std::string_view
-{
-    return to_string(a_state);
-}
-
-auto parse_state(std::string_view a_text) -> std::optional<OrderState>
-{
-    if (a_text == "live") {
-        return OrderState::Live;
-    }
-    if (a_text == "partially_filled") {
-        return OrderState::PartiallyFilled;
-    }
-    if (a_text == "filled") {
-        return OrderState::Filled;
-    }
-    if (a_text == "canceled") {
-        return OrderState::Canceled;
-    }
-    if (a_text == "rejected") {
-        return OrderState::Rejected;
-    }
-    return std::nullopt;
-}
-
 auto event_string(const nlohmann::json& a_event, const char* a_name) -> std::optional<std::string>
 {
     const auto it = a_event.find(a_name);
@@ -85,8 +28,8 @@ auto place_submitted_event(const OrderRecord& a_record) -> nlohmann::json
             {"clientOrderId", a_record.client_order_id},
             {"symbol", a_record.symbol},
             {"venue", a_record.venue},
-            {"side", side_to_string(a_record.side)},
-            {"orderType", type_to_string(a_record.type)},
+            {"side", to_string(a_record.side)},
+            {"orderType", to_string(a_record.type)},
             {"price", a_record.price},
             {"quantity", a_record.quantity},
             {"timeInForce", a_record.time_in_force}};
@@ -98,8 +41,8 @@ auto place_accepted_event(const OrderRecord& a_record) -> nlohmann::json
             {"clientOrderId", a_record.client_order_id},
             {"symbol", a_record.symbol},
             {"venue", a_record.venue},
-            {"side", side_to_string(a_record.side)},
-            {"orderType", type_to_string(a_record.type)},
+            {"side", to_string(a_record.side)},
+            {"orderType", to_string(a_record.type)},
             {"price", a_record.price},
             {"quantity", a_record.quantity},
             {"timeInForce", a_record.time_in_force},
@@ -111,7 +54,7 @@ auto adopted_event(const OrderRecord& a_record) -> nlohmann::json
 {
     nlohmann::json event = place_accepted_event(a_record);
     event["type"] = "adopted";
-    event["state"] = state_to_string(a_record.state);
+    event["state"] = to_string(a_record.state);
     event["filledQuantity"] = a_record.filled_quantity;
     event["averageFillPrice"] = a_record.average_fill_price;
     return event;
@@ -133,7 +76,7 @@ auto amended_event(const OrderRecord& a_record) -> nlohmann::json
             {"clientOrderId", a_record.client_order_id},
             {"price", a_record.price},
             {"quantity", a_record.quantity},
-            {"state", state_to_string(a_record.state)},
+            {"state", to_string(a_record.state)},
             {"exchangeOrderId", a_record.exchange_order_id},
             {"version", a_record.legs.empty() ? 1 : a_record.legs.back().version}};
 }
@@ -142,7 +85,7 @@ auto state_event(const OrderRecord& a_record) -> nlohmann::json
 {
     return {{"type", "state"},
             {"clientOrderId", a_record.client_order_id},
-            {"state", state_to_string(a_record.state)},
+            {"state", to_string(a_record.state)},
             {"filledQuantity", a_record.filled_quantity},
             {"averageFillPrice", a_record.average_fill_price},
             {"exchangeOrderId", a_record.exchange_order_id},
@@ -170,6 +113,19 @@ auto OrderManagementSystem::connector_for(const OrderRecord& a_record) const -> 
         return connector_for(a_record.venue);
     }
     return connector_for(default_venue_); // records from pre-venue logs
+}
+
+auto OrderManagementSystem::unsupported_venue_error(const std::string& a_venue) const -> Error
+{
+    std::string names;
+    for (const auto& [key, connector] : connectors_) {
+        if (!names.empty()) {
+            names += ", ";
+        }
+        names += key;
+    }
+    return Error{"invalid_request",
+                 "unsupported venue \"" + a_venue + "\" (configured: " + names + ")"};
 }
 
 auto OrderManagementSystem::venues() const -> std::vector<std::string>
@@ -307,8 +263,7 @@ auto OrderManagementSystem::place(const OrderRequest& a_request, std::string_vie
 
         connector = connector_for(venue);
         if (connector == nullptr) {
-            return Error{"invalid_request",
-                         "unsupported venue \"" + venue + "\" (configured: okx, binance)"};
+            return unsupported_venue_error(venue);
         }
 
         // ---- pre-trade risk ----
@@ -461,7 +416,7 @@ auto OrderManagementSystem::cancel(std::string_view a_client_order_id) -> Result
         }
         if (is_terminal(record.state)) {
             return Error{"order_terminal", "order " + record.client_order_id + " is " +
-                                               std::string{state_to_string(record.state)}};
+                                               std::string{to_string(record.state)}};
         }
         connector = connector_for(record);
         if (connector == nullptr) {
@@ -521,7 +476,7 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
         }
         if (is_terminal(record.state)) {
             return Error{"order_terminal", "order " + record.client_order_id + " is " +
-                                               std::string{state_to_string(record.state)}};
+                                               std::string{to_string(record.state)}};
         }
         connector = connector_for(record);
         if (connector == nullptr) {
@@ -594,9 +549,7 @@ auto OrderManagementSystem::amend(const AmendCommand& a_command) -> Result<Order
                     }
                 }
                 if (!newest_unknown.empty()) {
-                    note_exchange_id(record, newest_unknown);
-                    ++stats_.legs_discovered;
-                    note_discovered_leg(record.client_order_id, newest_unknown);
+                    adopt_unknown_leg(record, newest_unknown);
                 }
             }
             // Buffered reports are real venue observations and still apply
@@ -666,15 +619,7 @@ auto OrderManagementSystem::get_price(const std::string& a_symbol,
     const std::string venue{a_venue.empty() ? default_venue_ : std::string{a_venue}};
     const auto connector = connector_for(venue);
     if (connector == nullptr) {
-        std::string names;
-        for (const auto& [key, entry] : connectors_) {
-            if (!names.empty()) {
-                names += ", ";
-            }
-            names += key;
-        }
-        return Error{"invalid_request",
-                     "unsupported venue \"" + venue + "\" (configured: " + names + ")"};
+        return unsupported_venue_error(venue);
     }
     const auto price = connector->get_price(a_symbol);
     if (!price.is_ok()) {
@@ -725,6 +670,12 @@ auto OrderManagementSystem::apply_observation(OrderRecord& a_record, OrderState 
     return changed;
 }
 
+void OrderManagementSystem::push_leg(OrderRecord& a_record, const std::string& a_id)
+{
+    a_record.legs.push_back(
+        OrderLeg{.version = a_record.legs.size() + 1, .exchange_order_id = a_id});
+}
+
 void OrderManagementSystem::note_exchange_id(OrderRecord& a_record, const std::string& a_id)
 {
     if (a_id.empty() || a_id == a_record.exchange_order_id) {
@@ -732,8 +683,7 @@ void OrderManagementSystem::note_exchange_id(OrderRecord& a_record, const std::s
     }
     a_record.exchange_order_id = a_id;
     // backfill/adoption path: the observed id is newest known truth
-    a_record.legs.push_back(
-        OrderLeg{.version = a_record.legs.size() + 1, .exchange_order_id = a_id});
+    push_leg(a_record, a_id);
 }
 
 void OrderManagementSystem::append_amend_leg(OrderRecord& a_record, const std::string& a_id)
@@ -744,9 +694,15 @@ void OrderManagementSystem::append_amend_leg(OrderRecord& a_record, const std::s
     // The amend ack always advances the version, even when the venue
     // echoes the current id (in-place amend venues): the leg table is the
     // amend ledger first, the id mapping second.
-    a_record.legs.push_back(
-        OrderLeg{.version = a_record.legs.size() + 1, .exchange_order_id = a_id});
+    push_leg(a_record, a_id);
     a_record.exchange_order_id = a_id;
+}
+
+void OrderManagementSystem::adopt_unknown_leg(OrderRecord& a_record, const std::string& a_id)
+{
+    note_exchange_id(a_record, a_id);
+    ++stats_.legs_discovered;
+    note_discovered_leg(a_record.client_order_id, a_id);
 }
 
 auto OrderManagementSystem::leg_index_of(const OrderRecord& a_record, const std::string& a_id) const
@@ -820,9 +776,7 @@ void OrderManagementSystem::apply_arbitrated_report(OrderRecord& a_record,
     if (!a_report.exchange_order_id.empty() && !a_record.legs.empty()) {
         const auto match = leg_index_of(a_record, a_report.exchange_order_id);
         if (!match.has_value()) {
-            note_exchange_id(a_record, a_report.exchange_order_id);
-            ++stats_.legs_discovered;
-            note_discovered_leg(a_record.client_order_id, a_report.exchange_order_id);
+            adopt_unknown_leg(a_record, a_report.exchange_order_id);
         } else if (*match + 1 < a_record.legs.size()) {
             apply_lifecycle = false;
         }
@@ -985,9 +939,7 @@ auto OrderManagementSystem::reconcile() -> ReconcileReport
                 // The venue snapshot carries an id no leg knows: an amend
                 // whose ack never resolved (transport-unresolved). Adopt
                 // it as the newest leg so reports arbitrate correctly.
-                note_exchange_id(record, snapshot.value()->exchange_order_id);
-                ++stats_.legs_discovered;
-                note_discovered_leg(record.client_order_id, snapshot.value()->exchange_order_id);
+                adopt_unknown_leg(record, snapshot.value()->exchange_order_id);
                 changed = true;
             }
             if (apply_observation(record, snapshot.value()->state,
@@ -1065,7 +1017,7 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
                                            : event_string(a_event, "exchangeOrderId").value_or("");
         const auto side =
             parse_side(event_string(a_event, "side").value_or("buy")).value_or(Side::Buy);
-        const auto order_type = parse_type(event_string(a_event, "orderType").value_or("limit"))
+        const auto order_type = parse_order_type(event_string(a_event, "orderType").value_or("limit"))
                                     .value_or(OrderType::Limit);
         OrderRecord record{.client_order_id = *client_order_id,
                            .symbol = symbol,
@@ -1094,7 +1046,7 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
                                                .exchange_order_id = exchange_order_id});
         }
         if (*type == "adopted") {
-            record.state = parse_state(event_string(a_event, "state").value_or("live"))
+            record.state = parse_order_state(event_string(a_event, "state").value_or("live"))
                                .value_or(OrderState::Live);
             record.filled_quantity = event_string(a_event, "filledQuantity").value_or("0");
             record.average_fill_price = event_string(a_event, "averageFillPrice").value_or("");
@@ -1134,7 +1086,7 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
             // keep the historic Canceled->Live resurrection — old logs
             // contain the amend-race shape the runtime no longer writes.
             note_exchange_id(it->second, exchange_order_id);
-            const auto state = parse_state(event_string(a_event, "state").value_or(""));
+            const auto state = parse_order_state(event_string(a_event, "state").value_or(""));
             if (state.has_value() && it->second.state == OrderState::Canceled &&
                 *state == OrderState::Live) {
                 it->second.state = OrderState::Live;
@@ -1163,7 +1115,7 @@ void OrderManagementSystem::apply_log_event(const nlohmann::json& a_event)
         if (it == orders_.end()) {
             return;
         }
-        const auto state = parse_state(event_string(a_event, "state").value_or(""));
+        const auto state = parse_order_state(event_string(a_event, "state").value_or(""));
         if (!state.has_value()) {
             return;
         }

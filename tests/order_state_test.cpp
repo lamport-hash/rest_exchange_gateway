@@ -132,3 +132,42 @@ TEST_CASE("pending resolves through every legal path and never cancels")
     OrderState direct_fill = OrderState::Live;
     CHECK(apply_transition(direct_fill, OrderState::Filled) == TransitionResult::Applied);
 }
+
+TEST_CASE("enum names round-trip through to_string and parse_order_state")
+{
+    for (const auto state : all_states()) {
+        const auto name = to_string(state);
+        CHECK(parse_order_state(name).has_value());
+        CHECK(*parse_order_state(name) == state);
+    }
+    CHECK(parse_order_state("pending") == OrderState::Pending); // gateway-local, round-trips
+
+    // case-insensitive input parses to the same value
+    CHECK(parse_order_state("LIVE") == OrderState::Live);
+    CHECK(parse_order_state("Partially_Filled") == OrderState::PartiallyFilled);
+
+    // unknown spellings (incl. the to_string fallback) are rejected
+    CHECK_FALSE(parse_order_state("unknown").has_value());
+    CHECK_FALSE(parse_order_state("").has_value());
+    CHECK_FALSE(parse_order_state("partially").has_value());
+    CHECK_FALSE(parse_order_state(" cancelled").has_value());
+}
+
+TEST_CASE("side and order type parse and stringify")
+{
+    CHECK(to_string(Side::Buy) == "buy");
+    CHECK(to_string(Side::Sell) == "sell");
+    CHECK(parse_side("buy") == Side::Buy);
+    CHECK(parse_side("SELL") == Side::Sell);
+    CHECK(parse_side(to_string(Side::Buy)) == Side::Buy);
+    CHECK_FALSE(parse_side("buys").has_value());
+    CHECK_FALSE(parse_side("").has_value());
+
+    CHECK(to_string(OrderType::Limit) == "limit");
+    CHECK(to_string(OrderType::Market) == "market");
+    CHECK(parse_order_type("market") == OrderType::Market);
+    CHECK(parse_order_type("Limit") == OrderType::Limit);
+    CHECK(parse_order_type(to_string(OrderType::Market)) == OrderType::Market);
+    CHECK_FALSE(parse_order_type("stop").has_value());
+    CHECK_FALSE(parse_order_type("").has_value());
+}

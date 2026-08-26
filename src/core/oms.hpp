@@ -306,6 +306,9 @@ class OrderManagementSystem
     /// Connector that owns a record (venue field, default fallback).
     [[nodiscard]] auto connector_for(const OrderRecord& a_record) const -> ExchangeConnector*;
 
+    /// Error for an unknown venue key, naming the configured venues.
+    [[nodiscard]] auto unsupported_venue_error(const std::string& a_venue) const -> Error;
+
     /// Apply one observation (WS report or REST snapshot). Returns true
     /// when something changed. Transitions go through the state machine
     /// (illegal/stale ones are discarded); filled_quantity only moves
@@ -364,6 +367,10 @@ class OrderManagementSystem
 
     void apply_log_event(const nlohmann::json& a_event);
 
+    /// Append one leg (version = last + 1) with a_id. Mutex_ must be
+    /// held.
+    void push_leg(OrderRecord& a_record, const std::string& a_id);
+
     /// Register a venue order id on the record: current moves to a_id,
     /// the full lifecycle (legs) accumulates. No-op for an empty id or
     /// one that is already current. Amends do NOT use this (they always
@@ -375,6 +382,11 @@ class OrderManagementSystem
     /// on cancelReplace venues, repeated on in-place venues) and make it
     /// current. Mutex_ must be held.
     void append_amend_leg(OrderRecord& a_record, const std::string& a_id);
+
+    /// Adopt an exchange order id no leg knew (a lost amend ack or a
+    /// transport-unresolved amend): newest leg, discovery stat and audit
+    /// note. Mutex_ must be held.
+    void adopt_unknown_leg(OrderRecord& a_record, const std::string& a_id);
 
     /// Highest leg index whose exchange order id equals a_id; a_id not
     /// found -> a_id absent from the leg table (returns nullopt).

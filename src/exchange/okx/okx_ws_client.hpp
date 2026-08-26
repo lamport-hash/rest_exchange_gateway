@@ -1,6 +1,7 @@
 #pragma once
 
 #include "exchange/okx/okx_rest_client.hpp"
+#include "exchange/ws_feed_support.hpp"
 #include "gateway/exchange_connector.hpp"
 
 #include <atomic>
@@ -83,16 +84,11 @@ class OkxOrdersFeed final
     [[nodiscard]] auto is_running() const -> bool;
 
   private:
-    /// Result of one connect -> login -> subscribe -> read cycle.
-    struct SessionOutcome
-    {
-        /// Why the session ended (empty when stopped by the caller).
-        std::string failure;
-        /// Subscribed AND proven alive (inbound traffic after the
-        /// subscribe — e.g. pongs — or a subscribed uptime >= 30s).
-        /// A healthy session resets the reconnect backoff.
-        bool healthy = false;
-    };
+    /// Result of one connect -> login -> subscribe -> read cycle
+    /// (shared shape; healthy = inbound traffic after the subscribe —
+    /// e.g. pongs — or a subscribed uptime >= 30s, which resets the
+    /// reconnect backoff).
+    using SessionOutcome = FeedSessionOutcome;
 
     void emit(FeedEventType a_type, std::string a_detail) const;
     void run(std::stop_token a_stop);

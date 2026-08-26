@@ -1,7 +1,6 @@
 #include "exchange/binance/binance_ws_client.hpp"
 
 #include "core/decimal.hpp"
-#include "core/retry.hpp"
 #include "exchange/binance/binance_wire.hpp"
 
 #include <httplib.h>
@@ -10,26 +9,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
-#include <random>
 #include <utility>
 
 namespace gateway::exchange::binance {
 
 namespace {
-
-/// A subscribed session alive at least this long counts as healthy even
-/// without served requests (quiet but functional link).
-constexpr auto kHealthySessionSeconds = std::chrono::seconds{30};
-
-/// Wait for a_duration, but wake up as soon as a_stop is requested.
-void interruptible_sleep(std::chrono::milliseconds a_duration, std::stop_token a_stop)
-{
-    std::condition_variable_any cv;
-    std::mutex mutex;
-    std::stop_callback wake_on_stop{a_stop, [&cv] { cv.notify_all(); }};
-    std::unique_lock lock(mutex);
-    cv.wait_for(lock, a_duration, [&a_stop] { return a_stop.stop_requested(); });
-}
 
 /// Average fill price = cummulativeQuoteQty / cumulative filled quantity
 /// (docs note), exact at up to 8 fractional digits. Empty when nothing
@@ -79,7 +63,8 @@ auto real_unix_ms() -> long long
 
 BinanceWsClient::BinanceWsClient(BinanceConfig a_config, UnixMsProvider a_timestamp)
     : config_(std::move(a_config)),
-      timestamp_(std::move(a_timestamp) ? a_timestamp : UnixMsProvider{&real_unix_ms})
+      timestamp_(std::move(a_timestamp) ? a_timestamp : UnixMsProvider{&real_unix_ms}),
+      dump_events_{std::getenv("GATEWAY_BINANCE_DUMP_EVENTS") != nullptr}
 {}
 
 BinanceWsClient::~BinanceWsClient()
@@ -381,7 +366,7 @@ void BinanceWsClient::handle_user_event(const nlohmann::json& a_event)
     if (client_order_id.empty()) {
         client_order_id = a_event.value("c", std::string{});
     }
-    if (getenv("GATEWAY_BINANCE_DUMP_EVENTS") != nullptr) {
+    if (dump_events_) {
         std::cerr << "[binance-raw-event] " << a_event.dump() << '\n';
     }
     if (client_order_id.empty()) {
@@ -602,27 +587,9 @@ auto BinanceWsClient::run_session(std::stop_token a_stop) -> SessionOutcome
 
 void BinanceWsClient::run(std::stop_token a_stop)
 {
-    unsigned connect_attempt = 0;
-    while (!a_stop.stop_requested()) {
-        const SessionOutcome outcome = run_session(a_stop);
-        if (a_stop.stop_requested()) {
-            break;
-        }
-        if (outcome.healthy) {
-            // the venue was reachable and responsive this session: the
-            // next failure is a fresh incident, not the tail of the last
-            // one — start the backoff over instead of climbing to max
-            connect_attempt = 0;
-        }
-        ++connect_attempt;
-        emit(BinanceFeedEventType::Disconnected, outcome.failure);
-
-        static thread_local std::mt19937_64 engine{std::random_device{}()};
-        std::uniform_real_distribution<double> uniform{0.0, 1.0};
-        const auto raw = backoff_for(config_.retry, static_cast<int>(connect_attempt));
-        const auto delay = apply_jitter(config_.retry, raw, uniform(engine));
-        interruptible_sleep(delay, a_stop);
-    }
+    reconnect_loop(
+        a_stop, config_.retry, [this, a_stop] { return run_session(a_stop); },
+        [this](const std::string& a_failure) { emit(BinanceFeedEventType::Disconnected, a_failure); });
     emit(BinanceFeedEventType::Stopped, "feed stopped");
 }
 

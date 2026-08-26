@@ -40,30 +40,6 @@ auto is_valid_client_order_id(std::string_view a_id) -> bool
     return true;
 }
 
-auto parse_side(std::string_view a_text) -> std::optional<Side>
-{
-    const auto lower = to_lower(a_text);
-    if (lower == "buy") {
-        return Side::Buy;
-    }
-    if (lower == "sell") {
-        return Side::Sell;
-    }
-    return std::nullopt;
-}
-
-auto parse_order_type(std::string_view a_text) -> std::optional<OrderType>
-{
-    const auto lower = to_lower(a_text);
-    if (lower == "limit") {
-        return OrderType::Limit;
-    }
-    if (lower == "market") {
-        return OrderType::Market;
-    }
-    return std::nullopt;
-}
-
 auto parse_time_in_force(std::string_view a_text) -> std::optional<std::string>
 {
     auto upper = to_lower(a_text);
@@ -76,24 +52,14 @@ auto parse_time_in_force(std::string_view a_text) -> std::optional<std::string>
     return std::nullopt;
 }
 
-auto side_to_string(Side a_side) -> std::string_view
-{
-    return a_side == Side::Buy ? "buy" : "sell";
-}
-
-auto type_to_string(OrderType a_type) -> std::string_view
-{
-    return a_type == OrderType::Limit ? "limit" : "market";
-}
-
 auto record_json(const OrderRecord& a_record) -> nlohmann::json
 {
     nlohmann::json body = {{"clientOrderId", a_record.client_order_id},
                            {"exchangeOrderId", a_record.exchange_order_id},
                            {"symbol", a_record.symbol},
                            {"venue", a_record.venue},
-                           {"side", side_to_string(a_record.side)},
-                           {"type", type_to_string(a_record.type)},
+                           {"side", to_string(a_record.side)},
+                           {"type", to_string(a_record.type)},
                            {"timeInForce", a_record.time_in_force},
                            {"state", to_string(a_record.state)},
                            {"price", a_record.price},

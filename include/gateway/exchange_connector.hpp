@@ -2,6 +2,8 @@
 
 #include "gateway/result.hpp"
 
+#include <cctype>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <string>
@@ -206,6 +208,85 @@ class ExchangeConnector
         return "rejected";
     }
     return "unknown";
+}
+
+/// Lower-case name of a side ("buy"/"sell").
+[[nodiscard]] inline auto to_string(Side a_side) -> std::string_view
+{
+    return a_side == Side::Buy ? "buy" : "sell";
+}
+
+/// Lower-case name of an order type ("limit"/"market").
+[[nodiscard]] inline auto to_string(OrderType a_type) -> std::string_view
+{
+    return a_type == OrderType::Limit ? "limit" : "market";
+}
+
+/// ASCII case-insensitive equality of two views (locale-independent).
+[[nodiscard]] inline auto equals_ignore_case(std::string_view a_lhs, std::string_view a_rhs) -> bool
+{
+    if (a_lhs.size() != a_rhs.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < a_lhs.size(); ++index) {
+        if (std::tolower(static_cast<unsigned char>(a_lhs[index])) !=
+            std::tolower(static_cast<unsigned char>(a_rhs[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Case-insensitive inverse of to_string(Side). std::nullopt for any
+/// other spelling.
+[[nodiscard]] inline auto parse_side(std::string_view a_text) -> std::optional<Side>
+{
+    if (equals_ignore_case(a_text, "buy")) {
+        return Side::Buy;
+    }
+    if (equals_ignore_case(a_text, "sell")) {
+        return Side::Sell;
+    }
+    return std::nullopt;
+}
+
+/// Case-insensitive inverse of to_string(OrderType). std::nullopt for
+/// any other spelling.
+[[nodiscard]] inline auto parse_order_type(std::string_view a_text) -> std::optional<OrderType>
+{
+    if (equals_ignore_case(a_text, "limit")) {
+        return OrderType::Limit;
+    }
+    if (equals_ignore_case(a_text, "market")) {
+        return OrderType::Market;
+    }
+    return std::nullopt;
+}
+
+/// Case-insensitive inverse of to_string(OrderState). "pending" is a
+/// valid gateway-local state (round-trips); venue observations never
+/// carry it. std::nullopt for any other spelling.
+[[nodiscard]] inline auto parse_order_state(std::string_view a_text) -> std::optional<OrderState>
+{
+    if (equals_ignore_case(a_text, "pending")) {
+        return OrderState::Pending;
+    }
+    if (equals_ignore_case(a_text, "live")) {
+        return OrderState::Live;
+    }
+    if (equals_ignore_case(a_text, "partially_filled")) {
+        return OrderState::PartiallyFilled;
+    }
+    if (equals_ignore_case(a_text, "filled")) {
+        return OrderState::Filled;
+    }
+    if (equals_ignore_case(a_text, "canceled")) {
+        return OrderState::Canceled;
+    }
+    if (equals_ignore_case(a_text, "rejected")) {
+        return OrderState::Rejected;
+    }
+    return std::nullopt;
 }
 
 } // namespace gateway

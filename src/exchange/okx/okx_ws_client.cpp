@@ -1,7 +1,6 @@
 #include "exchange/okx/okx_ws_client.hpp"
 
 #include "core/clock.hpp"
-#include "core/retry.hpp"
 #include "exchange/okx/okx_signer.hpp"
 #include "exchange/okx/okx_wire.hpp"
 
@@ -9,28 +8,12 @@
 
 #include <algorithm>
 #include <chrono>
-#include <condition_variable>
 #include <mutex>
-#include <random>
 #include <utility>
 
 namespace gateway::exchange::okx {
 
 namespace {
-
-/// A subscribed session alive at least this long counts as healthy even
-/// without inbound traffic (quiet but functional link).
-constexpr auto kHealthySessionSeconds = std::chrono::seconds{30};
-
-/// Wait for a_duration, but wake up as soon as a_stop is requested.
-void interruptible_sleep(std::chrono::milliseconds a_duration, std::stop_token a_stop)
-{
-    std::condition_variable_any cv;
-    std::mutex mutex;
-    std::stop_callback wake_on_stop{a_stop, [&cv] { cv.notify_all(); }};
-    std::unique_lock lock(mutex);
-    cv.wait_for(lock, a_duration, [&a_stop] { return a_stop.stop_requested(); });
-}
 
 auto now_ms() -> long long
 {
@@ -332,27 +315,9 @@ auto OkxOrdersFeed::run_session(std::stop_token a_stop) -> SessionOutcome
 
 void OkxOrdersFeed::run(std::stop_token a_stop)
 {
-    unsigned connect_attempt = 0;
-    while (!a_stop.stop_requested()) {
-        const SessionOutcome outcome = run_session(a_stop);
-        if (a_stop.stop_requested()) {
-            break;
-        }
-        if (outcome.healthy) {
-            // the venue was reachable and responsive this session: the
-            // next failure is a fresh incident, not the tail of the last
-            // one — start the backoff over instead of climbing to max
-            connect_attempt = 0;
-        }
-        ++connect_attempt;
-        emit(FeedEventType::Disconnected, outcome.failure);
-
-        static thread_local std::mt19937_64 engine{std::random_device{}()};
-        std::uniform_real_distribution<double> uniform{0.0, 1.0};
-        const auto raw = backoff_for(config_.retry, static_cast<int>(connect_attempt));
-        const auto delay = apply_jitter(config_.retry, raw, uniform(engine));
-        interruptible_sleep(delay, a_stop);
-    }
+    reconnect_loop(
+        a_stop, config_.retry, [this, a_stop] { return run_session(a_stop); },
+        [this](const std::string& a_failure) { emit(FeedEventType::Disconnected, a_failure); });
     emit(FeedEventType::Stopped, "feed stopped");
 }
 

@@ -2,6 +2,7 @@
 
 #include "exchange/binance/binance_config.hpp"
 #include "exchange/binance/binance_signer.hpp"
+#include "exchange/ws_feed_support.hpp"
 #include "gateway/exchange_connector.hpp"
 
 #include <atomic>
@@ -132,17 +133,10 @@ class BinanceWsClient final
         bool failed = false;                    // session died / send failed
     };
 
-    /// Result of one connect -> subscribe -> read cycle.
-    struct SessionOutcome
-    {
-        /// Why the session ended (empty when stopped by the caller).
-        std::string failure;
-        /// Subscribed AND proven alive (a response served after the
-        /// subscribe, or a subscribed uptime >= 30s). A healthy session
-        /// resets the reconnect backoff: the venue was reachable, so the
-        /// next failure should start at initialBackoffMs again.
-        bool healthy = false;
-    };
+    /// Result of one connect -> subscribe -> read cycle (shared shape;
+    /// healthy = a response served after the subscribe, or a subscribed
+    /// uptime >= 30s — resets the reconnect backoff).
+    using SessionOutcome = FeedSessionOutcome;
 
     void emit(BinanceFeedEventType a_type, std::string a_detail);
     void run(std::stop_token a_stop);
@@ -191,6 +185,11 @@ class BinanceWsClient final
 
     BinanceConfig config_;
     UnixMsProvider timestamp_;
+
+    /// Debug hook: dump raw executionReport events to stderr. Captured
+    /// once at construction from GATEWAY_BINANCE_DUMP_EVENTS (no getenv
+    /// in the report hot path).
+    bool dump_events_ = false;
 
     /// serverTime - localTime offset (ms), learned from the venue "time"
     /// method on -1021 recovery and at session start. Atomic because
