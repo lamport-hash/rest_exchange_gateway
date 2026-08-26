@@ -146,6 +146,13 @@ if(GATEWAY_BUILD_TESTS)
     target_link_libraries(latency_test PRIVATE gateway_test_support gateway_rest)
     add_test(NAME latency_test COMMAND latency_test)
 
+    # Real-clock, report-only latency benchmark (p50/p95/p99/max/mean of
+    # the instrumented windows); asserts measurement plumbing, never speed.
+    add_executable(latency_bench_test tests/latency_bench_test.cpp)
+    target_include_directories(latency_bench_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(latency_bench_test PRIVATE gateway_test_support gateway_rest)
+    add_test(NAME latency_bench_test COMMAND latency_bench_test)
+
     add_executable(clock_test tests/clock_test.cpp)
     target_link_libraries(clock_test PRIVATE gateway_core)
     add_test(NAME clock_test COMMAND clock_test)
