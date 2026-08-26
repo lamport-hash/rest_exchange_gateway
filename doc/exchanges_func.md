@@ -72,6 +72,7 @@ Venue facts the parameter table encodes (live-verified):
 tests/live/live_func_tests.sh okx                     # OKX demo, or
 tests/live/live_func_tests.sh binance                 # Binance testnet
 docker compose exec dev tests/live/live_func_tests.sh okx
+tests/live/multi_venue_recovery_tests.sh              # both venues (see §6)
 ```
 
 `tests/live/okx_live_func_tests.sh` remains as a thin wrapper for
@@ -164,13 +165,40 @@ Notes:
   used for the suite's direct signed REST helper instead. The gateway
   itself only needs `ws-api.testnet.binance.vision`.
 
-## 6. Reproduce checklist
+## 6. Dual-venue recovery suite (`tests/live/multi_venue_recovery_tests.sh`)
+
+One gateway instance configured for **both** venues; requires both
+credential sections in the config. 66 assertions, ~2 minutes, zero net
+fund consumption (every order rests far from the mid and is canceled or
+terminal by the end; start/end balance guard over BOTH venues, 1000 USDT
+cap).
+
+| # | Section | Assertions (summary) |
+|---|---|---|
+| A1 | dual-venue start | health 200; waits for BOTH venue feeds (3 `reconcile` lines: startup + one per venue WS connect) before the first place |
+| A2 | one resting order per venue | okx + binance 201 `live`, venue `exchangeOrderId`s captured, both `live` WS reports logged |
+| A3 | hard crash | `SIGKILL` mid-flight with 2 orders live at the venues; REST API proven gone (curl connection refused) |
+| A4 | restart | same config + same event log; `recovered` replay + startup reconcile logged |
+| A5 | recovery | both orders 200 `live` with the SAME `exchangeOrderId`s, reconciled against both venues |
+| A6 | idempotency across the crash | re-POST both clientOrderIds → 201 `replayed:true`, same venue ids |
+| A7 | writes through the recovered gateway | okx amend keeps the venue id; binance amend mints a NEW one (cancelReplace); both cancel → 200 + `canceled` WS reports |
+| B1 | isolation instance | okx section poisoned to `127.0.0.1:9` (real closed port, WS off, 300 ms timeouts, 1.5 s retry budget); binance section untouched; waits for the binance feed (ws-api needs seconds to come up — a place before that is a transport 502) |
+| B2 | okx unreachable | place → 502 `venue_unavailable` within budget; intent stays `pending` (GET 200, no `exchangeOrderId`); same-id retry → 202 `pending` (never re-sent) |
+| B3 | isolation holds | binance place on the SAME instance → 201 `live` |
+| B4 | okx recovery | graceful stop; live okx section restored, SAME port + SAME event log; restart; both feeds reconnect |
+| B5 | pending resolution | startup reconcile proves absence against live okx (51603) → `rejected` `venue_absent` |
+| B6 | blast radius | binance order untouched (`live`, same venue id, cancelable); DELETE of the rejected okx order → 409 `order_terminal` |
+
+Expected result (observed 2026-08-26): **66 passed, 0 failed**.
+
+## 7. Reproduce checklist
 
 ```bash
 docker compose up -d dev
 cp config/gateway.example.json config/gateway.json   # + fill venue credentials
 tests/live/live_func_tests.sh okx
 tests/live/live_func_tests.sh binance
+tests/live/multi_venue_recovery_tests.sh             # needs BOTH venue sections
 docker compose exec dev ctest --preset debug && docker compose exec dev ctest --preset release
 ```
 

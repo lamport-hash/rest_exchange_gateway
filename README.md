@@ -183,6 +183,12 @@ withdrawals disabled (true for both OKX demo and Binance testnet keys).
 - Live venue suites (`tests/live/live_func_tests.sh okx|binance`,
   85 assertions per venue, no mocks) and runbook
   (`doc/exchanges_func.md`).
+- Live dual-venue recovery suite (`tests/live/multi_venue_recovery_tests.sh`,
+  66 assertions, one gateway on BOTH venues): hard SIGKILL crash with one
+  live order per venue -> restart -> both recovered/reconciled with the
+  same exchangeOrderIds; and venue isolation (OKX on a really closed
+  port while Binance stays live) -> 502/pending -> okx recovery ->
+  pending resolved `venue_absent` while the Binance order is untouched.
 
 All network-dependent behavior is mocked; CI never needs connectivity.
 
@@ -266,7 +272,9 @@ Live venue suites (need real demo/testnet credentials in the config):
 ```bash
 tests/live/live_func_tests.sh okx            # OKX demo trading
 tests/live/live_func_tests.sh binance        # Binance spot testnet
-                                             # runbook: doc/exchanges_func.md
+                                              # runbook: doc/exchanges_func.md
+tests/live/multi_venue_recovery_tests.sh     # both venues: crash + isolation
+                                              # recovery (66 assertions)
 ```
 
 ## Monitor UI (compose apps)
